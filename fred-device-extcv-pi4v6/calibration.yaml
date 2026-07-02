@@ -1,0 +1,4 @@
+# diameter_coefficient is no longer used: diameter calibration is done on the
+# external CV computer (in mm) and streamed to the Pi over USB.
+motor_intercept: -51.304312538704494
+motor_slope: 2.5377984045767166

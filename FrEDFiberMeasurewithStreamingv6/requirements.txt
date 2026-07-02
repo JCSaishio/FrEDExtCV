@@ -1,0 +1,6 @@
+opencv-python>=4.5
+numpy>=1.21
+Pillow>=8.0
+openpyxl>=3.0
+# The WiFi link to the Pi uses Python's built-in ``socket`` module, so no
+# extra streaming package (such as pyserial) is required.

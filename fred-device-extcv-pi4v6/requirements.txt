@@ -1,0 +1,23 @@
+# Python packages installed by pip INTO the fred-venv virtual environment.
+#
+# NOTE: PyQt5 (incl. QtSvg) and RPi.GPIO are intentionally NOT listed here.
+# On a Raspberry Pi 4 those are installed from apt by setup_install.sh and made
+# visible to the venv via --system-site-packages. Installing PyQt5 from pip on
+# the Pi compiles for a long time and frequently ships WITHOUT the QtSvg module
+# (the "cannot import QtSvg from PyQt5" error), so we use the apt build instead.
+
+# --- Link to the external CV computer ---
+# The diameter is received over WiFi (TCP) using Python's built-in ``socket``
+# module, so no extra package is needed for the link itself.
+
+# --- Config files (calibration.yaml) ---
+PyYAML
+
+# --- Math / plotting ---
+numpy
+matplotlib
+
+# --- Pi hardware: ADC over SPI, CircuitPython hardware layer ---
+adafruit-blinka
+adafruit-circuitpython-mcp3xxx
+spidev
