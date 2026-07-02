@@ -356,6 +356,15 @@ M2 (or leave the wrong pin) — but microstepping is the recommended setting.
 
 ## Troubleshooting
 
+- **Installer fails to download anything** (`Release file ... is not valid
+  yet`, `certificate is not yet valid`, or every apt/pip download erroring) —
+  the Pi's clock is wrong (it has no battery-backed clock). The installer now
+  fixes this itself as its **first step**: it enables NTP and waits for sync,
+  and if NTP can't reach out it sets the date from a web server's HTTP header.
+  If it still warns that it could not synchronize, the Pi has no internet
+  route at all — remember the `FrED_Pi` hotspot has **no internet**; run
+  `bash setup_hotspot.sh down`, join a normal WiFi network (or plug in
+  ethernet), then re-run `bash setup_install.sh`.
 - **`cannot import 'QtSvg' from 'PyQt5'`** — the QtSvg module is missing. The
   installer fixes this by installing `python3-pyqt5.qtsvg` from apt and building
   `fred-venv` with `--system-site-packages`. If you hit it manually:
