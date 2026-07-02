@@ -1,0 +1,9 @@
+# Normalize text files; keep OS-specific scripts runnable on their target OS.
+* text=auto
+
+# Shell scripts run on the Raspberry Pi (Linux) - must stay LF even when the
+# repo is checked out or copied from Windows, or bash fails with '\r' errors.
+*.sh text eol=lf
+
+# Windows batch files need CRLF.
+*.bat text eol=crlf
