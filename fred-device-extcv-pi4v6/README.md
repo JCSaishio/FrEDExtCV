@@ -211,22 +211,34 @@ The laptop can send a **whole experiment** to FrED and have it run automatically
 then send the recorded data back. Configure it on the laptop app's
 **Experiment (FrED)** tab; this Pi code runs the sequence:
 
-1. **HEATING** — heater only, for the *heating delay*.
-2. **SETTLE** — spooler, stepper and fan activated, wait the *data delay*.
-3. **RECORDING** — everything runs **and** data is recorded, for the
+1. **HEATING** — heater only, for the *heating time*.
+2. **HEATING + EXTRUSION** — heater **and** the extrusion stepper, for the
+   *heating + extrusion time*. The stepper runs at its **own, independently
+   configurable rate** for this phase (set on the laptop), so the extruder can
+   be primed before anything spools. Spooler and fan stay off.
+3. **SETTLE** — spooler, stepper (now at the experiment's normal extrusion
+   speed) and fan all activated, wait the *experiment settle time*.
+4. **RECORDING** — everything runs **and** data is recorded, for the
    *data-taking time*. Diameter (streamed from the laptop), temperature and
    spooler RPM are all logged on **FrED's own clock**, rebased so t = 0 at the
    start of recording.
-4. **COMPLETE** — actuators stop; the CSV is held until the laptop clicks
-   **Retrieve Data**.
+5. **EXTRA SPOOLING** — heater, stepper and fan stop, but the **spooler keeps
+   running** for the user-set *extra spooling time*, coiling the fiber that was
+   already extruded. The recorded CSV is already available to retrieve during
+   this phase.
+6. **COMPLETE** — every actuator stopped; the CSV is held until the laptop
+   clicks **Retrieve Data**.
 
 Heater and spooler each run **closed-loop** (setpoint + PID) or **open-loop**
-(raw PWM), chosen per run on the laptop. While an experiment runs the on-screen
-manual controls are ignored — **except the red STOP buttons, which abort the
-run** and stop everything. The current phase and time remaining show in the
-Diameter panel. Implemented in `experiment.py` (state machine), driven by
-`main.py`; the recorded window is exported by `Database.generate_csv_string()`
-and sent back over the same WiFi link.
+(raw PWM), chosen per run on the laptop. While an experiment runs, **every
+on-screen control is disabled** — start buttons, PID gain boxes, setpoint
+spinboxes, the temperature and fan sliders, the sampling rate, graph reset and
+CSV export — and shown in lighter gray colors, so nothing can interfere with
+the run. The only live controls are the **red STOP buttons, which abort the
+run** and stop everything (including the extra-spooling phase). The current
+phase and time remaining show in the Diameter panel. Implemented in
+`experiment.py` (state machine), driven by `main.py`; the recorded data is
+sent back over the same WiFi link.
 
 ## How the link works
 

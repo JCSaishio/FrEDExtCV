@@ -55,7 +55,8 @@ bash start_fred.sh       # run the FrED interface (activates fred-venv)
 **Laptop** (once: `setup_install.bat` or `python setup_install.py`):
 
 1. Join the **`FrED_Pi`** WiFi (password `fredfiber123`).
-2. Run `python fiber_measure.py` in `FrEDFiberMeasurewithStreamingv6/`.
+2. Double-click **`Run FrED Fiber Measure.bat`** in
+   `FrEDFiberMeasurewithStreamingv6/` (or run `python fiber_measure.py`).
 3. **Calibrate** the camera (px→mm) so streamed values are in millimetres.
 4. In *Stream to FrED Pi (WiFi)*: IP `192.168.4.1`, port `5005` → **Connect**
    (streaming auto-starts).
@@ -65,17 +66,24 @@ bash start_fred.sh       # run the FrED interface (activates fred-venv)
 
 ## Automated experiments (v6)
 
-From the laptop's **Experiment (FrED)** tab you define timing (heating delay,
-settle delay, data-taking time), heater and spooler modes (closed-loop
-setpoint+PID or open-loop PWM), stepper speed, fan duty and target diameter.
-FrED then runs the sequence on its own:
+From the laptop's **Experiment (FrED)** tab you define the sequence timing
+(heating time, heating+extrusion time and its own extrusion rate, settle time,
+data-taking time, extra post-run spooling time), heater and spooler modes
+(closed-loop setpoint+PID or open-loop PWM), stepper speed, fan duty and target
+diameter. FrED then runs the sequence on its own:
 
-**HEATING → SETTLE → RECORDING → COMPLETE**
+**HEATING → HEATING+EXTRUSION → SETTLE → RECORDING → EXTRA SPOOLING → COMPLETE**
+
+During heating+extrusion only the heater and the extrusion stepper run, at an
+independently configurable extrusion rate. After recording ends everything
+stops **except the spooler**, which keeps coiling the extruded fiber for the
+user-set extra spooling time.
 
 All data is timestamped on the Pi's clock (t = 0 at the start of recording) and
 returned on **Retrieve Data** as a semicolon-delimited CSV plus an xlsx copy.
-While an experiment runs, FrED's manual controls are locked — except the red
-**STOP** buttons, which abort the run.
+While an experiment runs, **every** control on FrED's screen (start buttons,
+PID gains, setpoints, sliders) is disabled and shown grayed-out — except the
+red **STOP** buttons, which abort the run.
 
 ## Version history
 
@@ -106,6 +114,7 @@ FrEDExtCV/
 │   └── calibration.yaml / requirements.txt
 └── FrEDFiberMeasurewithStreamingv6/  # Windows laptop — CV + streaming (see its README)
     ├── fiber_measure.py              #   entry point (app)
+    ├── Run FrED Fiber Measure.bat    #   double-click launcher (no console needed)
     ├── setup_install.py / setup_install.bat
     └── calibration.json / requirements.txt
 ```

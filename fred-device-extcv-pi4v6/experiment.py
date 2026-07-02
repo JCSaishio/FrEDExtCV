@@ -4,9 +4,14 @@ An experiment is configured on the laptop (the CV app) and sent to the Pi over
 the existing WiFi/TCP link. This controller runs the automated sequence:
 
     HEATING   - heater only, for ``heating_delay`` seconds
-    SETTLE    - all other parameters activated, wait ``data_delay`` seconds
+    EXTRUDING - heater + extrusion stepper (at its own independent rate,
+                ``heat_extrude_speed`` RPM), for ``heat_extrude_time`` seconds
+    SETTLE    - all systems activated, wait ``data_delay`` seconds
     RECORDING - everything running AND data recorded, for ``data_taking_time``
-    COMPLETE  - actuators stopped, recorded CSV held until the laptop asks for it
+    SPOOLING  - everything stopped EXCEPT the spooler, which keeps running for
+                ``post_spool_time`` seconds to coil the already-extruded fiber
+    COMPLETE  - all actuators stopped, recorded CSV held until the laptop asks
+                for it (the CSV is already available during SPOOLING)
 
 All data is timestamped on the Pi's own clock and, for the export, rebased so
 the recording starts at t = 0. The heater and spooler can each run closed-loop
@@ -25,8 +30,10 @@ from database import Database
 class Experiment:
     IDLE = "idle"
     HEATING = "heating"
+    EXTRUDING = "extruding"      # heating + extrusion, before anything spools
     SETTLE = "settle"
     RECORDING = "recording"
+    SPOOLING = "spooling"        # post-run: spooler only, coiling loose fiber
     COMPLETE = "complete"
     ABORTED = "aborted"
 
@@ -90,7 +97,14 @@ class Experiment:
     def override(self, key: str):
         """Return the experiment value for ``key`` while a run is active, else
         None so the GUI falls back to its manual widget value."""
-        if not self.active or key not in self.params:
+        if not self.active:
+            return None
+        # During the heating+extrusion phase the stepper runs at its own,
+        # independently configured rate (not the recording-phase rate).
+        if (key == "extrusion_speed" and self.phase == Experiment.EXTRUDING
+                and "heat_extrude_speed" in self.params):
+            key = "heat_extrude_speed"
+        if key not in self.params:
             return None
         try:
             return float(self.params[key])
@@ -121,10 +135,27 @@ class Experiment:
             self._idle_movers(extruder, spooler, fan)
             self._tick_remaining(t, self._delay("heating_delay"))
             if t - self.phase_start >= self._delay("heating_delay"):
+                self.phase = Experiment.EXTRUDING
+                self.phase_start = t
+                self._notify(Experiment.EXTRUDING,
+                             "Heating done - extruding (heater + stepper)")
+
+        elif self.phase == Experiment.EXTRUDING:
+            # Heater + stepper only; the stepper speed comes from the
+            # phase-specific ``heat_extrude_speed`` (see override()).
+            self._drive_heater(t, extruder)
+            period = self.gui.get_sample_period()
+            if t - self._last_aux >= period:
+                self._last_aux = t
+                extruder.stepper_control_loop()
+                self.gui.diameter_source.update(t)
+            self._idle_spooler_fan(spooler, fan)
+            self._tick_remaining(t, self._delay("heat_extrude_time"))
+            if t - self.phase_start >= self._delay("heat_extrude_time"):
                 self.phase = Experiment.SETTLE
                 self.phase_start = t
                 self._notify(Experiment.SETTLE,
-                             "Heating done - parameters activated")
+                             "Extrusion primed - all systems activated")
 
         elif self.phase == Experiment.SETTLE:
             self._drive_all(t, extruder, spooler, fan)
@@ -147,12 +178,41 @@ class Experiment:
             self._tick_remaining(t, self._delay("data_taking_time"))
             if t - self.phase_start >= self._delay("data_taking_time"):
                 self._build_csv()
-                self._stop_all(extruder, spooler, fan)
-                self.phase = Experiment.COMPLETE
-                self.active = False
-                self.remaining = 0.0
-                self._notify(Experiment.COMPLETE,
-                             "Recording complete - data ready to retrieve")
+                spool_time = self._delay("post_spool_time")
+                if spool_time > 0:
+                    # Stop everything but the spooler, which keeps coiling the
+                    # fiber already extruded. Data is ready to retrieve now.
+                    self._stop_all_but_spooler(extruder, fan)
+                    self.phase = Experiment.SPOOLING
+                    self.phase_start = t
+                    self._notify(Experiment.SPOOLING,
+                                 f"Recording complete - spooling "
+                                 f"{spool_time:.0f}s more (data ready)")
+                else:
+                    self._stop_all(extruder, spooler, fan)
+                    self._finish(Experiment.COMPLETE,
+                                 "Recording complete - data ready to retrieve")
+
+        elif self.phase == Experiment.SPOOLING:
+            # Only the spooler runs (same mode/setpoint as the experiment).
+            if self._mode("spooler_mode") == "open":
+                spooler.dc_motor_open_loop_control(t)
+            else:
+                spooler.dc_motor_close_loop_control(t)
+            self._tick_remaining(t, self._delay("post_spool_time"))
+            if t - self.phase_start >= self._delay("post_spool_time"):
+                try:
+                    spooler.stop_motor()
+                except Exception as exc:
+                    print(f"[Experiment] spooler stop error: {exc}")
+                self._finish(Experiment.COMPLETE,
+                             "Extra spooling done - data ready to retrieve")
+
+    def _finish(self, phase: str, message: str) -> None:
+        self.phase = phase
+        self.active = False
+        self.remaining = 0.0
+        self._notify(phase, message)
 
     # ------------------------------------------------------------------ #
     # Actuator helpers
@@ -190,11 +250,28 @@ class Experiment:
         except Exception as exc:
             print(f"[Experiment] idle error: {exc}")
 
+    def _idle_spooler_fan(self, spooler, fan) -> None:
+        """Heating+extrusion phase: spooler and fan held at zero."""
+        try:
+            spooler.stop_motor()
+            fan.update_duty_cycle(0)
+        except Exception as exc:
+            print(f"[Experiment] idle error: {exc}")
+
     def _stop_all(self, extruder, spooler, fan) -> None:
         try:
             extruder.stop_heater()
             extruder.stop_stepper()
             spooler.stop_motor()
+            fan.update_duty_cycle(0)
+        except Exception as exc:
+            print(f"[Experiment] stop error: {exc}")
+
+    def _stop_all_but_spooler(self, extruder, fan) -> None:
+        """End of recording: heater, stepper and fan off; spooler keeps going."""
+        try:
+            extruder.stop_heater()
+            extruder.stop_stepper()
             fan.update_duty_cycle(0)
         except Exception as exc:
             print(f"[Experiment] stop error: {exc}")
@@ -261,6 +338,12 @@ class Experiment:
     def _tick_remaining(self, t: float, duration: float) -> None:
         self.remaining = max(0.0, duration - (t - self.phase_start))
 
+    PHASE_TEXT = {HEATING: "heating (heater only)",
+                  EXTRUDING: "heating + extrusion",
+                  SETTLE: "settling (all systems on)",
+                  RECORDING: "recording",
+                  SPOOLING: "extra spooling (data ready)"}
+
     def status_line(self) -> str:
         if self.phase == Experiment.IDLE:
             return "Experiment: idle"
@@ -269,7 +352,8 @@ class Experiment:
             return f"Experiment: complete{ready}"
         if self.phase == Experiment.ABORTED:
             return "Experiment: aborted"
-        return f"Experiment: {self.phase} ({self.remaining:.0f}s left)"
+        text = self.PHASE_TEXT.get(self.phase, self.phase)
+        return f"Experiment: {text} ({self.remaining:.0f}s left)"
 
     def _notify(self, phase: str, message: str) -> None:
         """Push a status update to the laptop (best-effort)."""

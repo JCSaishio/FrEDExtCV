@@ -1314,15 +1314,32 @@ class FiberApp:
                        "camera running and calibrated for diameter to be "
                        "recorded.").pack(anchor="w", pady=(0, 6))
 
-        # --- Timing ---
-        tbox = ttk.LabelFrame(panel, text="Timing (seconds)", padding=(8, 5))
+        # --- Experiment sequence timing ---
+        tbox = ttk.LabelFrame(panel, text="Experiment sequence", padding=(8, 5))
         tbox.pack(fill=tk.X, pady=3)
         self.exp_heating_delay_var = tk.StringVar(value="60")
+        self.exp_heat_extrude_time_var = tk.StringVar(value="30")
+        self.exp_heat_extrude_speed_var = tk.StringVar(value="1.5")
         self.exp_data_delay_var = tk.StringVar(value="10")
         self.exp_data_time_var = tk.StringVar(value="120")
-        self._exp_row(tbox, "Heating delay (heat only)", self.exp_heating_delay_var, 0)
-        self._exp_row(tbox, "Data delay (after activate)", self.exp_data_delay_var, 1)
-        self._exp_row(tbox, "Data-taking time", self.exp_data_time_var, 2)
+        self.exp_post_spool_var = tk.StringVar(value="15")
+        self._exp_row(tbox, "Heating time (s) - heater only",
+                      self.exp_heating_delay_var, 0)
+        self._exp_row(tbox, "Heating + extrusion time (s)",
+                      self.exp_heat_extrude_time_var, 1)
+        self._exp_row(tbox, "Extrusion rate during it (RPM)",
+                      self.exp_heat_extrude_speed_var, 2)
+        self._exp_row(tbox, "Experiment settle time (s)",
+                      self.exp_data_delay_var, 3)
+        self._exp_row(tbox, "Data-taking time (s)", self.exp_data_time_var, 4)
+        self._exp_row(tbox, "Extra spooling after end (s)",
+                      self.exp_post_spool_var, 5)
+        ttk.Label(tbox, foreground="#555", wraplength=340,
+                  text="Sequence: heat only -> heat + extrude (at the rate "
+                       "above) -> settle with all systems on -> record -> "
+                       "everything stops except the spooler, which keeps "
+                       "coiling fiber for the extra spooling time.").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # --- Heater ---
         hbox = ttk.LabelFrame(panel, text="Heater", padding=(8, 5))
@@ -1427,14 +1444,22 @@ class FiberApp:
             return
         try:
             heating = float(self.exp_heating_delay_var.get())
+            heat_extrude = float(self.exp_heat_extrude_time_var.get())
+            heat_extrude_rpm = float(self.exp_heat_extrude_speed_var.get())
             data_delay = float(self.exp_data_delay_var.get())
             data_time = float(self.exp_data_time_var.get())
+            post_spool = float(self.exp_post_spool_var.get())
         except ValueError:
-            messagebox.showwarning("Timing", "Delays and data-taking time must "
-                                   "be numbers (seconds).")
+            messagebox.showwarning("Timing", "Every sequence field must be a "
+                                   "number (times in seconds, rate in RPM).")
             return
         if data_time <= 0:
             messagebox.showwarning("Timing", "Data-taking time must be > 0.")
+            return
+        if min(heating, heat_extrude, data_delay, post_spool,
+               heat_extrude_rpm) < 0:
+            messagebox.showwarning("Timing", "Sequence values cannot be "
+                                   "negative.")
             return
 
         params = {
@@ -1455,8 +1480,11 @@ class FiberApp:
             "fan_duty": self._exp_float(self.exp_fan_var, 0),
             "target_diameter": self._exp_float(self.exp_target_diameter_var, 0.35),
             "heating_delay": heating,
+            "heat_extrude_time": heat_extrude,
+            "heat_extrude_speed": heat_extrude_rpm,
             "data_delay": data_delay,
             "data_taking_time": data_time,
+            "post_spool_time": post_spool,
         }
 
         if not self.calib.is_calibrated:
@@ -1476,9 +1504,10 @@ class FiberApp:
 
         if self.streamer.send_command({"type": "experiment", "params": params}):
             self.exp_data_ready = False
-            total = heating + data_delay + data_time
+            total = heating + heat_extrude + data_delay + data_time
+            spool_note = f" + {post_spool:.0f}s spooling" if post_spool else ""
             self.exp_status_var.set(
-                f"Experiment sent. Heating... (total ~{total:.0f}s)")
+                f"Experiment sent. Heating... (total ~{total:.0f}s{spool_note})")
             self.status_var.set("Experiment sent to FrED.")
         else:
             messagebox.showerror("Send failed",

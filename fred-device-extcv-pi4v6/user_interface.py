@@ -38,6 +38,27 @@ class UserInterface():
         "QPushButton:disabled { background-color: #b0b0b0; color: #e8e8e8;"
         " border: 1px solid #999999; }")
 
+    # Disabled inputs go visibly lighter while a remote experiment owns the
+    # hardware (set_controls_locked); applied window-wide so every spinbox,
+    # text field and slider shows the same "locked" look.
+    LOCKED_INPUT_STYLE = (
+        "QDoubleSpinBox:disabled, QLineEdit:disabled {"
+        " background-color: #ececec; color: #a8a8a8;"
+        " border: 1px solid #cccccc; }")
+
+    SLIDER_STYLE = (
+        "QSlider::groove:horizontal { height: 6px; background: #c9c9c9;"
+        " border-radius: 3px; }"
+        "QSlider::sub-page:horizontal { background: #3a6ea5;"
+        " border-radius: 3px; }"
+        "QSlider::handle:horizontal { background: #3a6ea5;"
+        " border: 1px solid #2c567f; width: 16px; margin: -6px 0;"
+        " border-radius: 8px; }"
+        "QSlider::groove:horizontal:disabled { background: #e6e6e6; }"
+        "QSlider::sub-page:horizontal:disabled { background: #d5d5d5; }"
+        "QSlider::handle:horizontal:disabled { background: #cfcfcf;"
+        " border: 1px solid #bbbbbb; }")
+
     def __init__(self) -> None:
         self.app = QApplication([])
         self.window = QWidget()
@@ -82,7 +103,8 @@ class UserInterface():
 
         # --- Assemble window ---------------------------------------------- #
         self._build_layout()
-        self.window.setWindowTitle("MIT FrED - External CV (WiFi, v5)")
+        self.window.setStyleSheet(self.LOCKED_INPUT_STYLE)
+        self.window.setWindowTitle("MIT FrED - External CV (WiFi, v6)")
         self.window.setGeometry(80, 60, 1600, 1000)
         self.window.setMinimumSize(1200, 800)
         self.app.aboutToQuit.connect(self.diameter_source.close)
@@ -114,6 +136,7 @@ class UserInterface():
         self.target_temperature.setMinimum(65)
         self.target_temperature.setMaximum(150)
         self.target_temperature.setValue(95)
+        self.target_temperature.setStyleSheet(self.SLIDER_STYLE)
         self.target_temperature.valueChanged.connect(self.update_temperature_slider_label)
 
         self.temperature_kp = self._make_spinbox(0.0, 2.0, 1.0, 0.001, 5)
@@ -129,6 +152,7 @@ class UserInterface():
         self.fan_duty_cycle.setMinimum(0)
         self.fan_duty_cycle.setMaximum(100)
         self.fan_duty_cycle.setValue(30)
+        self.fan_duty_cycle.setStyleSheet(self.SLIDER_STYLE)
         self.fan_duty_cycle.valueChanged.connect(self.update_fan_slider_label)
 
         # DC (spooling) motor controls
@@ -334,10 +358,10 @@ class UserInterface():
     def _build_graphs_group(self) -> QGroupBox:
         box = QGroupBox("Graphs & Sampling")
         layout = QVBoxLayout()
-        reset_btn = QPushButton("Reset Graphs")
-        reset_btn.setStyleSheet(self.BUTTON_STYLE)
-        reset_btn.clicked.connect(self.reset_graphs)
-        layout.addWidget(reset_btn)
+        self.reset_graphs_btn = QPushButton("Reset Graphs")
+        self.reset_graphs_btn.setStyleSheet(self.BUTTON_STYLE)
+        self.reset_graphs_btn.clicked.connect(self.reset_graphs)
+        layout.addWidget(self.reset_graphs_btn)
         note = QLabel("Reset clears the Diameter, Temperature and DC Motor plots "
                       "on screen (logged CSV data is kept).")
         note.setWordWrap(True)
@@ -377,10 +401,10 @@ class UserInterface():
         box = QGroupBox("Data Export")
         layout = QVBoxLayout()
         layout.addWidget(self.csv_filename)
-        download_csv = QPushButton("Download CSV File")
-        download_csv.setStyleSheet(self.BUTTON_STYLE)
-        download_csv.clicked.connect(self.set_download_csv)
-        layout.addWidget(download_csv)
+        self.download_csv_btn = QPushButton("Download CSV File")
+        self.download_csv_btn.setStyleSheet(self.BUTTON_STYLE)
+        self.download_csv_btn.clicked.connect(self.set_download_csv)
+        layout.addWidget(self.download_csv_btn)
         box.setLayout(layout)
         return box
 
@@ -728,13 +752,29 @@ class UserInterface():
             plot.redraw()
 
     def set_controls_locked(self, locked: bool) -> None:
-        """Disable/enable the manual control buttons (STOP buttons stay live).
+        """Disable/enable EVERY manual control while a remote experiment runs.
 
-        Disabled buttons go a lighter gray (see BUTTON_STYLE :disabled)."""
-        for btn in (self.diameter_loop_btn, self.start_device_btn,
-                    self.heater_open_btn, self.motor_close_btn, self.dc_open_btn,
-                    self.monitor_btn, self.fan_toggle_btn):
-            btn.setEnabled(not locked)
+        Only the red STOP Heater / STOP Spooling Motor / STOP Stepper buttons
+        stay live (they abort the experiment). Everything else - start buttons,
+        PID gain boxes, setpoint spinboxes, the temperature and fan sliders,
+        the sampling rate, file name and export/reset buttons - is disabled in
+        the system and shown in lighter colors (see the :disabled rules in
+        BUTTON_STYLE, LOCKED_INPUT_STYLE and SLIDER_STYLE)."""
+        controls = (
+            # buttons
+            self.diameter_loop_btn, self.start_device_btn,
+            self.heater_open_btn, self.motor_close_btn, self.dc_open_btn,
+            self.monitor_btn, self.fan_toggle_btn, self.reset_graphs_btn,
+            self.download_csv_btn,
+            # setpoints / gains / inputs
+            self.target_diameter, self.extrusion_motor_speed,
+            self.target_temperature, self.temperature_kp, self.temperature_ki,
+            self.temperature_kd, self.heater_open_loop_pwm,
+            self.fan_duty_cycle, self.dc_motor_pwm, self.motor_setpoint,
+            self.motor_kp, self.motor_ki, self.motor_kd,
+            self.csv_filename, self.sample_rate_hz)
+        for widget in controls:
+            widget.setEnabled(not locked)
 
     def _update_rate_label(self) -> None:
         """Show the effective sampling rate actually being written to the CSV

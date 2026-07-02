@@ -56,21 +56,27 @@ first (the diameter is streamed from this laptop, so keep the camera running and
 calibrated).
 
 Fill in:
-- **Timing (s):** *heating delay* (heat only), *data delay* (after the other
-  parameters switch on), and *data-taking time*.
+- **Experiment sequence:** *heating time* (heater only), *heating + extrusion
+  time* with its **own extrusion rate (RPM)** for priming the extruder,
+  *experiment settle time* (all systems on before recording), *data-taking
+  time*, and the *extra spooling after end* — how long the spooler keeps
+  coiling fiber after everything else stops.
 - **Heater** and **Spooler:** pick **closed** (setpoint + PID gains) or **open**
   (raw PWM) mode and enter the matching values.
-- **Extruder / Fan / Diameter:** stepper speed (RPM), fan duty (%), target
-  diameter (mm).
+- **Extruder / Fan / Diameter:** stepper speed (RPM) used from the settle phase
+  onward, fan duty (%), target diameter (mm).
 - **Save:** the file name and folder for the returned data.
 
 Then:
-1. **Send & Start Experiment** — FrED heats, then activates everything, then
-   records. The status line (and FrED's screen) shows the phase and time left.
+1. **Send & Start Experiment** — FrED heats, then heats + extrudes, then
+   activates everything, then records, then keeps only the spooler running for
+   the extra spooling time. The status line (and FrED's screen) shows the phase
+   and time left. While it runs, everything on FrED's screen is locked and
+   grayed out except the red STOP buttons.
    *(Diameter streaming is auto-enabled so it gets recorded.)*
-2. When it finishes, click **Retrieve Data** — FrED sends the recorded CSV and
-   it is saved as **`<name>.csv`** (FrED's three-table format) **and**
-   **`<name>.xlsx`** in the chosen folder.
+2. When recording finishes (you don't have to wait for the extra spooling),
+   click **Retrieve Data** — FrED sends the recorded CSV and it is saved as
+   **`<name>.csv`** **and** **`<name>.xlsx`** in the chosen folder.
 3. **Abort** stops a running experiment at any time (the red STOP buttons on
    FrED also abort it).
 
@@ -95,6 +101,13 @@ There is also a one-call installer in this folder:
 (or double-click `setup_install.bat` on Windows).
 
 ## Run
+
+**Easiest:** double-click **`Run FrED Fiber Measure.bat`** — it launches the
+app with no console window and no commands to type. You can also copy that
+file anywhere (e.g. the Desktop) and it will still find and start the app (if
+you move the app folder itself, update the `APP_DIR` line inside the .bat).
+
+Or from a terminal:
 
 ```bash
 "C:/Users/saish/anaconda3/python.exe" fiber_measure.py
