@@ -66,12 +66,10 @@ def hardware_control(gui: UserInterface) -> None:
             if gui.experiment.is_active():
                 if stop_pressed:
                     gui.experiment.abort()
-                    extruder.stop_heater()
-                    extruder.stop_stepper()
-                    spooler.stop_motor()
-                    fan.update_duty_cycle(0)
-                else:
-                    gui.experiment.update(current_time, extruder, spooler, fan)
+                # update() services a pending abort first (from a STOP button
+                # here or the laptop's Abort): it stops heater, stepper,
+                # spooler AND fan and clears the manual control flags.
+                gui.experiment.update(current_time, extruder, spooler, fan)
                 time.sleep(LOOP_SLEEP)
                 continue
 

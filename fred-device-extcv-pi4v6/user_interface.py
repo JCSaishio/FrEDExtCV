@@ -729,6 +729,15 @@ class UserInterface():
             self._controls_locked = locked
             self.set_controls_locked(locked)
 
+        # Keep the fan toggle in step with fan_enabled: an experiment abort
+        # switches the fan off from the hardware/network side, not the button.
+        fan_text = "STOP Fan" if self.fan_enabled else "Start Fan"
+        if self.fan_toggle_btn.text() != fan_text:
+            self.fan_toggle_btn.setText(fan_text)
+            self.fan_toggle_btn.setStyleSheet(
+                self.STOP_BUTTON_STYLE if self.fan_enabled
+                else self.BUTTON_STYLE)
+
         text = self.diameter_source.status_text()
         if self.diameter_loop_enabled:
             text += "  |  loop: ON"

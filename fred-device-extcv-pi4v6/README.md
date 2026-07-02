@@ -234,11 +234,22 @@ Heater and spooler each run **closed-loop** (setpoint + PID) or **open-loop**
 on-screen control is disabled** — start buttons, PID gain boxes, setpoint
 spinboxes, the temperature and fan sliders, the sampling rate, graph reset and
 CSV export — and shown in lighter gray colors, so nothing can interfere with
-the run. The only live controls are the **red STOP buttons, which abort the
-run** and stop everything (including the extra-spooling phase). The current
-phase and time remaining show in the Diameter panel. Implemented in
-`experiment.py` (state machine), driven by `main.py`; the recorded data is
-sent back over the same WiFi link.
+the run.
+
+**Graphs reset with the recording** — the on-screen plots are cleared when the
+experiment is received and again the instant **RECORDING** starts, so what you
+see on the graphs during recording is exactly the data that will be sent back
+in the CSV/Excel.
+
+**Aborting stops everything** — the **red STOP buttons** on the Pi (the only
+controls left live) and the **Abort button on the laptop** both end the run by
+stopping **all** systems: heater, stepper, spooler and fan are actively driven
+to zero (including during the extra-spooling phase), and the manual control
+loops are cleared so nothing resumes on its own. If no experiment is running,
+the laptop's Abort still works as a remote all-stop. The current phase and
+time remaining show in the Diameter panel. Implemented in `experiment.py`
+(state machine), driven by `main.py`; the recorded data is sent back over the
+same WiFi link.
 
 ## How the link works
 

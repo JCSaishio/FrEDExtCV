@@ -77,8 +77,10 @@ Then:
 2. When recording finishes (you don't have to wait for the extra spooling),
    click **Retrieve Data** — FrED sends the recorded CSV and it is saved as
    **`<name>.csv`** **and** **`<name>.xlsx`** in the chosen folder.
-3. **Abort** stops a running experiment at any time (the red STOP buttons on
-   FrED also abort it).
+3. **Abort** stops the experiment at any time and shuts down **every** system
+   on FrED — heater, extruder, spooler and fan are all driven to zero (the red
+   STOP buttons on FrED do the same). Even with no experiment running, Abort
+   acts as a remote all-stop for FrED.
 
 ## Setup
 

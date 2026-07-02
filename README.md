@@ -81,9 +81,12 @@ user-set extra spooling time.
 
 All data is timestamped on the Pi's clock (t = 0 at the start of recording) and
 returned on **Retrieve Data** as a semicolon-delimited CSV plus an xlsx copy.
-While an experiment runs, **every** control on FrED's screen (start buttons,
-PID gains, setpoints, sliders) is disabled and shown grayed-out — except the
-red **STOP** buttons, which abort the run.
+FrED's graphs are cleared the instant recording starts, so they show exactly
+the exported window. While an experiment runs, **every** control on FrED's
+screen (start buttons, PID gains, setpoints, sliders) is disabled and shown
+grayed-out — except the red **STOP** buttons. Aborting (a red STOP on FrED or
+the laptop's **Abort** button) stops **all** systems — heater, stepper,
+spooler and fan.
 
 ## Version history
 

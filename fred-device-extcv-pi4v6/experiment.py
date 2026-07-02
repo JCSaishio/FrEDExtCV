@@ -17,6 +17,14 @@ All data is timestamped on the Pi's own clock and, for the export, rebased so
 the recording starts at t = 0. The heater and spooler can each run closed-loop
 (setpoint + PID) or open-loop (raw PWM), chosen per experiment.
 
+The Pi's graphs are reset twice: when the experiment is received (clean run
+view) and again the moment RECORDING starts, so the on-screen plots show
+exactly the window that is exported to the CSV/Excel.
+
+An abort - the laptop's Abort button or a red STOP button on the Pi - stops
+EVERY system (heater, stepper, spooler, fan) and clears the manual control
+flags, so nothing keeps running or resumes on its own afterwards.
+
 The controller is driven once per hardware-loop iteration by
 :meth:`update`, and reads/writes only plain Python attributes, so it is safe to
 poke from the network thread (start/abort) while the hardware thread runs it.
@@ -47,6 +55,7 @@ class Experiment:
     def __init__(self, gui) -> None:
         self.gui = gui
         self.active = False
+        self.abort_pending = False   # set by abort(); serviced in update()
         self.phase = Experiment.IDLE
         self.params = {}
         self.phase_start = None      # set on the first update() (Pi clock)
@@ -69,6 +78,7 @@ class Experiment:
         self.phase_start = None
         self._last_aux = 0.0
         self._last_log = 0.0
+        self.abort_pending = False
         self.phase = Experiment.HEATING
         self.active = True
         # Ask the Pi UI to reset its graphs for a clean view of this run.
@@ -79,14 +89,46 @@ class Experiment:
         self._notify(Experiment.HEATING, "Experiment received - heating")
 
     def abort(self) -> None:
-        if not self.active and self.phase != Experiment.RECORDING:
-            self.active = False
-            self.phase = Experiment.ABORTED
+        """Abort request (laptop Abort button or a red STOP on the Pi).
+
+        Called from the network thread, so it only sets flags - the actual
+        actuator shutdown runs in the hardware thread (see update() ->
+        _do_abort), which owns the hardware objects. If no run is active the
+        laptop's Abort still acts as a remote ALL-STOP: the main loop's stop
+        handlers zero every output.
+        """
+        if self.active:
+            self.abort_pending = True
             return
+        # No run to unwind - remote all-stop via the one-shot stop flags that
+        # the hardware loop already services (they actively zero the outputs).
+        self.phase = Experiment.ABORTED
+        self.remaining = 0.0
+        self._all_systems_off_flags()
+        self._notify(Experiment.ABORTED, "Abort received - all systems stopped")
+
+    def _all_systems_off_flags(self) -> None:
+        """Clear every manual-control flag and request every output to zero."""
+        gui = self.gui
+        gui.device_started = False
+        gui.heater_open_loop_enabled = False
+        gui.dc_motor_open_loop_enabled = False
+        gui.dc_motor_close_loop_enabled = False
+        gui.fan_enabled = False          # fan stays off until restarted in the UI
+        gui.heater_stop_requested = True
+        gui.stepper_stop_requested = True
+        gui.dc_motor_stop_requested = True
+
+    def _do_abort(self, extruder, spooler, fan) -> None:
+        """Hardware-thread side of abort(): stop EVERY actuator, end the run."""
+        self.abort_pending = False
         self.active = False
         self.phase = Experiment.ABORTED
         self.remaining = 0.0
-        self._notify(Experiment.ABORTED, "Experiment aborted")
+        self._stop_all(extruder, spooler, fan)
+        self._all_systems_off_flags()
+        self._notify(Experiment.ABORTED,
+                     "Experiment aborted - all systems stopped")
 
     def is_active(self) -> bool:
         return self.active
@@ -124,6 +166,11 @@ class Experiment:
     # Main state machine (called every hardware-loop iteration)
     # ------------------------------------------------------------------ #
     def update(self, t: float, extruder, spooler, fan) -> None:
+        # An abort (laptop button or Pi STOP button) is serviced here, in the
+        # hardware thread, so every actuator is actively driven to zero.
+        if self.abort_pending and self.active:
+            self._do_abort(extruder, spooler, fan)
+            return
         if not self.active:
             return
         if self.phase_start is None:
@@ -166,6 +213,10 @@ class Experiment:
                 self.t0 = t
                 self._rows = []
                 self._last_log = t
+                # Clear the on-screen graphs right as recording begins, so the
+                # plots show exactly the window that will be exported to the
+                # CSV/Excel (handled on the GUI thread in _redraw_plots).
+                self.gui.pending_graph_reset = True
                 self._notify(Experiment.RECORDING, "Recording started")
 
         elif self.phase == Experiment.RECORDING:
