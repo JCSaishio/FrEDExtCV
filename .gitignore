@@ -1,0 +1,17 @@
+# Claude Code local session/config + assistant memory (local only)
+.claude/
+memory/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+fred-venv/
+venv/
+.venv/
+
+# Recorded experiment data
+Data/
+*.csv
+*.xlsx
