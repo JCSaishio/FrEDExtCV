@@ -74,6 +74,10 @@ class ExternalDiameter:
 
     PROTOCOL_VERSION = 1
     STREAM_TIMEOUT = 2.0       # seconds without data before "no signal"
+    READ_TIMEOUT = 0.5         # recv poll period on the client socket
+    SEND_TIMEOUT = 30.0        # deadline for one outgoing message (the
+                               # recorded CSV is >1 MB in a single line and
+                               # can NOT finish within READ_TIMEOUT on WiFi)
 
     # Jitter filter over received measurements (see module docstring):
     MEDIAN_WINDOW = 5          # median of the last N messages (despike)
@@ -118,9 +122,29 @@ class ExternalDiameter:
             if sock is None:
                 return False
             try:
-                sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+                payload = (json.dumps(obj) + "\n").encode("utf-8")
+                # The socket normally carries the short READ_TIMEOUT (recv
+                # polling). sendall() of a large payload (the recorded CSV)
+                # cannot finish within it over WiFi, and a timed-out sendall
+                # leaves a TRUNCATED line on the wire that corrupts every
+                # message after it. Give sends their own generous deadline.
+                sock.settimeout(self.SEND_TIMEOUT)
+                try:
+                    sock.sendall(payload)
+                finally:
+                    sock.settimeout(self.READ_TIMEOUT)
                 return True
-            except Exception:
+            except Exception as exc:
+                # An unknown prefix of the message may already be on the wire,
+                # so the stream is unrecoverable - close the connection so the
+                # laptop sees a clean disconnect and can reconnect fresh,
+                # instead of silently receiving garbage forever.
+                print(f"[ExternalDiameter] Send failed ({exc}); closing the "
+                      "client connection so the laptop can reconnect.")
+                try:
+                    sock.close()
+                except Exception:
+                    pass
                 return False
 
     def _send_recorded_data(self) -> None:
@@ -201,7 +225,7 @@ class ExternalDiameter:
                 continue
 
             print(f"[ExternalDiameter] Laptop connected from {addr[0]}:{addr[1]}")
-            client.settimeout(0.5)
+            client.settimeout(self.READ_TIMEOUT)
             with self._lock:
                 self._client_sock = client
                 self.connected = True

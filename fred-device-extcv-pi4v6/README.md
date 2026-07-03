@@ -402,6 +402,15 @@ M2 (or leave the wrong pin) — but microstepping is the recommended setting.
   Wi-Fi, then in *FrED Fiber Measure with Streaming v3* enter the Pi's IP/port,
   click **Connect** and **Start streaming**, and on the Pi press **Start
   Diameter/Camera Loop**.
+- **"Retrieve Data" waits forever on the laptop** — the recorded CSV travels
+  as one large (>1 MB) message. Older versions sent it with a 0.5 s socket
+  deadline, which the WiFi link cannot always meet; a timed-out send left a
+  truncated message on the wire that silently corrupted everything after it.
+  Fixed: sends now get their own 30 s deadline (`SEND_TIMEOUT` in
+  `external_diameter.py`), and if a send still fails the Pi closes the
+  connection so the laptop notices immediately and reconnects clean instead
+  of waiting on a poisoned stream. Make sure the Pi runs the current code
+  (`git pull` in this folder, then restart — no reinstall needed).
 - **Laptop can't connect / "connection refused"** — confirm the hotspot is up
   (`bash setup_hotspot.sh status`), that the laptop joined `FrED_Pi`, and that
   the Pi program is running (it's what opens port 5005). The Pi panel shows

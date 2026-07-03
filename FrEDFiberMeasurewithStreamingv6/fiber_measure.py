@@ -210,6 +210,12 @@ class TCPStreamer:
                     self.rx_queue.put(json.loads(text))
                 except (ValueError, json.JSONDecodeError):
                     pass
+        # The Pi closed the connection (or a read error): mark the link
+        # closed so is_open reflects reality even when nothing is being
+        # streamed. Only close if the socket is still OUR socket (a
+        # reconnect may already have installed a new one).
+        if not self._stop.is_set() and self.sock is sock:
+            self.close()
 
     def _send_obj(self, obj):
         """Send one JSON object; closes the link on error. Returns success."""
@@ -851,11 +857,35 @@ class FiberApp:
 
         ok = self.streamer.send(diameter, units, elapsed, result["found"])
         if not ok:
-            # Link dropped while streaming.
-            self.streaming = False
-            self.stream_btn.configure(text="Start streaming", state=tk.DISABLED)
-            self.connect_btn.configure(text="Connect")
-            self.stream_status_var.set("Link lost - reconnect to resume.")
+            self._mark_link_lost()
+
+    def _mark_link_lost(self):
+        """Close the link and put the connection UI in the 'lost' state."""
+        self.streaming = False
+        self.streamer.close()
+        self.stream_btn.configure(text="Start streaming", state=tk.DISABLED)
+        self.connect_btn.configure(text="Connect")
+        self.stream_status_var.set("Link lost - reconnect to resume.")
+
+    def _reset_link(self):
+        """Close and re-open the TCP connection to FrED (a fresh stream clears
+        any half-received message). Returns True if the link is open again."""
+        host, port = self.streamer.host, self.streamer.port
+        if host is None:
+            return False
+        try:
+            self.streamer.open(host, port)
+        except Exception:
+            self._mark_link_lost()
+            return False
+        self.connect_btn.configure(text="Disconnect")
+        self.stream_btn.configure(state=tk.NORMAL)
+        if self.streaming:
+            self.stream_status_var.set(f"Streaming to {self.streamer.endpoint}...")
+        else:
+            self.stream_status_var.set(
+                f"Connected to {self.streamer.endpoint} (idle)")
+        return True
 
     # ------------------------------------------------------------------ #
     # Display sizing / fullscreen
@@ -1580,16 +1610,29 @@ class FiberApp:
         if st is None:
             return
         if st["phase"] == "waiting":
+            elapsed = time.time() - st["t0"]
             if not self.streamer.is_open:
+                self._mark_link_lost()
                 self._finish_retrieve(
-                    ("error", "Link to FrED lost while waiting for the data."))
+                    ("error", "Link to FrED lost while waiting for the data.\n"
+                              "Reconnect on the 'Measure & Stream' tab, then "
+                              "try Retrieve Data again."))
                 return
-            if time.time() - st["t0"] > self.RETRIEVE_TIMEOUT_S:
+            if elapsed > self.RETRIEVE_TIMEOUT_S:
+                # The stream may be poisoned by a half-sent message - reset
+                # the connection so the next attempt starts clean.
+                if self._reset_link():
+                    extra = ("\n\nThe WiFi link was reset - click Retrieve "
+                             "Data to try again.")
+                else:
+                    extra = ("\n\nThe link could not be re-opened - reconnect "
+                             "on the 'Measure & Stream' tab, then try again.")
                 self._finish_retrieve(
                     ("error", f"FrED did not send the data within "
-                              f"{self.RETRIEVE_TIMEOUT_S} seconds.\n"
-                              "Check the link and try Retrieve Data again."))
+                              f"{self.RETRIEVE_TIMEOUT_S} seconds.{extra}"))
                 return
+            st["label"].set("Waiting for FrED to send the recorded data... "
+                            f"({elapsed:.0f} s)")
         elif st["phase"] == "saving":
             st["bar"]["value"] = st["frac"] * 100
             st["label"].set(st["text"])
