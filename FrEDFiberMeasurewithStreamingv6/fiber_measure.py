@@ -441,6 +441,7 @@ class FiberApp:
         # Remote-experiment state
         self.exp_save_dir = DATA_DIR
         self.exp_data_ready = False
+        self._retrieve = None         # state of a running Retrieve Data flow
 
         self._build_ui()
         self._set_initial_geometry()
@@ -1520,12 +1521,109 @@ class FiberApp:
             self.streamer.send_command({"type": "abort"})
             self.exp_status_var.set("Abort sent.")
 
+    RETRIEVE_TIMEOUT_S = 60   # give up if FrED sends nothing for this long
+
     def retrieve_data(self):
         if not self.streamer.is_open:
             messagebox.showwarning("Not connected", "Connect to FrED first.")
             return
-        if self.streamer.send_command({"type": "get_data"}):
-            self.status_var.set("Requested experiment data from FrED...")
+        if self._retrieve is not None:
+            return                       # a retrieval is already running
+        if not self.streamer.send_command({"type": "get_data"}):
+            messagebox.showerror("Request failed",
+                                 "Could not ask FrED for the data (link lost).")
+            return
+        self.status_var.set("Requested experiment data from FrED...")
+        self._open_retrieve_dialog()
+
+    # ------------------------------------------------------------------ #
+    # Modal progress dialog: blocks the app while the data is received,
+    # processed and saved, and shows a loading bar for each stage.
+    # ------------------------------------------------------------------ #
+    def _open_retrieve_dialog(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Retrieving data from FrED")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        frm = ttk.Frame(dlg, padding=(18, 14))
+        frm.pack(fill=tk.BOTH, expand=True)
+        label_var = tk.StringVar(
+            value="Waiting for FrED to send the recorded data...")
+        ttk.Label(frm, textvariable=label_var, wraplength=340).pack(anchor="w")
+        bar = ttk.Progressbar(frm, mode="indeterminate", length=340)
+        bar.pack(fill=tk.X, pady=(10, 8))
+        bar.start(12)
+        cancel_btn = ttk.Button(frm, text="Cancel",
+                                command=self._cancel_retrieve)
+        cancel_btn.pack()
+        dlg.protocol("WM_DELETE_WINDOW", self._cancel_retrieve)
+        # Center the dialog over the app, then make it modal (input to the
+        # rest of the application is blocked until it closes).
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width()
+                                       - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height()
+                                       - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dlg.grab_set()
+        self._retrieve = {
+            "dlg": dlg, "bar": bar, "label": label_var, "cancel": cancel_btn,
+            "phase": "waiting",       # waiting -> saving -> done
+            "frac": 0.0, "text": "", "result": None, "t0": time.time(),
+        }
+        self.root.after(100, self._poll_retrieve)
+
+    def _poll_retrieve(self):
+        """Tk-thread heartbeat: updates the bar, enforces the timeout, and
+        closes the dialog when the worker thread reports completion."""
+        st = self._retrieve
+        if st is None:
+            return
+        if st["phase"] == "waiting":
+            if not self.streamer.is_open:
+                self._finish_retrieve(
+                    ("error", "Link to FrED lost while waiting for the data."))
+                return
+            if time.time() - st["t0"] > self.RETRIEVE_TIMEOUT_S:
+                self._finish_retrieve(
+                    ("error", f"FrED did not send the data within "
+                              f"{self.RETRIEVE_TIMEOUT_S} seconds.\n"
+                              "Check the link and try Retrieve Data again."))
+                return
+        elif st["phase"] == "saving":
+            st["bar"]["value"] = st["frac"] * 100
+            st["label"].set(st["text"])
+        elif st["phase"] == "done":
+            self._finish_retrieve(st["result"])
+            return
+        self.root.after(100, self._poll_retrieve)
+
+    def _cancel_retrieve(self):
+        st = self._retrieve
+        if st is None or st["phase"] != "waiting":
+            return   # saving to disk cannot be cancelled - it finishes
+        self._finish_retrieve(("cancelled", None))
+
+    def _finish_retrieve(self, result):
+        st, self._retrieve = self._retrieve, None
+        if st is not None:
+            try:
+                st["dlg"].grab_release()
+                st["dlg"].destroy()
+            except tk.TclError:
+                pass
+        kind, payload = result
+        if kind == "ok":
+            saved, note = payload
+            self.exp_status_var.set("Experiment data saved.")
+            self.status_var.set(f"Saved {saved.splitlines()[0]}")
+            messagebox.showinfo("Experiment data saved",
+                                f"Saved FrED experiment data to:\n{saved}{note}")
+        elif kind == "error":
+            self.exp_status_var.set("Data retrieval failed.")
+            messagebox.showerror("Retrieve data", payload)
+        else:   # cancelled
+            self.status_var.set("Data retrieval cancelled.")
 
     # ------------------------------------------------------------------ #
     # Messages coming back from FrED (run on the Tk main thread)
@@ -1543,49 +1641,69 @@ class FiberApp:
                 self.exp_status_var.set(
                     f"Experiment: {text} - click 'Retrieve Data'.")
         elif mtype == "event" and msg.get("event") == "no_data":
-            messagebox.showinfo(
-                "No data", msg.get("message", "No experiment data available "
-                "yet. Run an experiment first."))
+            text = msg.get("message", "No experiment data available yet. "
+                                      "Run an experiment first.")
+            if self._retrieve is not None and self._retrieve["phase"] == "waiting":
+                self._finish_retrieve(("error", text))
+            else:
+                messagebox.showinfo("No data", text)
         elif mtype == "data":
             self._receive_experiment_data(msg)
 
     def _receive_experiment_data(self, msg):
+        st = self._retrieve
+        if st is None or st["phase"] != "waiting":
+            # Data arriving with no retrieval pending (e.g. after Cancel).
+            self.status_var.set("Data from FrED arrived after cancel - "
+                                "ignored. Click Retrieve Data to ask again.")
+            return
         try:
             csv_text = base64.b64decode(msg.get("b64", "")).decode("utf-8")
         except Exception as exc:
-            messagebox.showerror("Receive failed",
-                                 f"Could not decode the data: {exc}")
+            self._finish_retrieve(("error", f"Could not decode the data: {exc}"))
             return
         base = msg.get("name") or self.exp_name_var.get().strip() or "fred_experiment"
         for ch in '<>:"/\\|?*':
             base = base.replace(ch, "_")
-        self._save_experiment_data(base, csv_text)
+        # Switch the dialog to a determinate loading bar and process/save the
+        # files on a worker thread so the bar keeps moving (the Excel build
+        # takes several seconds for a long run).
+        st["phase"] = "saving"
+        st["cancel"].configure(state="disabled")
+        st["bar"].stop()
+        st["bar"].configure(mode="determinate", maximum=100, value=0)
+        st["text"] = "Data received - saving CSV..."
+        st["label"].set(st["text"])
+        threading.Thread(target=self._retrieve_worker,
+                         args=(st, base, csv_text), daemon=True).start()
 
-    def _save_experiment_data(self, base, csv_text):
-        folder = self.exp_save_dir
+    def _retrieve_worker(self, st, base, csv_text):
+        """Background thread: write CSV + formatted Excel, reporting progress.
+        No Tk calls in here - it only writes plain fields in ``st`` that the
+        _poll_retrieve() heartbeat displays."""
+        def progress(frac, text):
+            st["frac"] = frac
+            st["text"] = text
         try:
+            folder = self.exp_save_dir
             os.makedirs(folder, exist_ok=True)
-        except OSError as exc:
-            messagebox.showerror("Save failed", f"Could not create folder:\n{exc}")
-            return
-        csv_path = os.path.join(folder, base + ".csv")
-        xlsx_path = os.path.join(folder, base + ".xlsx")
-        try:
+            csv_path = os.path.join(folder, base + ".csv")
+            xlsx_path = os.path.join(folder, base + ".xlsx")
+            progress(0.02, "Data received - saving CSV...")
             with open(csv_path, "w", newline="", encoding="utf-8") as fh:
                 fh.write(csv_text)
-        except OSError as exc:
-            messagebox.showerror("Save failed", f"Could not write CSV:\n{exc}")
-            return
-        xlsx_ok, xlsx_msg = self._exp_write_xlsx(xlsx_path, csv_text)
-        saved = csv_path + ("\n" + xlsx_path if xlsx_ok else "")
-        note = "" if xlsx_ok else f"\n\nNote: Excel not written ({xlsx_msg})."
-        self.exp_status_var.set("Experiment data saved.")
-        self.status_var.set(f"Saved {csv_path}")
-        messagebox.showinfo("Experiment data saved",
-                            f"Saved FrED experiment data to:\n{saved}{note}")
+            xlsx_ok, xlsx_msg = self._exp_write_xlsx(xlsx_path, csv_text,
+                                                     progress=progress)
+            progress(1.0, "Done.")
+            saved = csv_path + ("\n" + xlsx_path if xlsx_ok else "")
+            note = "" if xlsx_ok else f"\n\nNote: Excel not written ({xlsx_msg})."
+            st["result"] = ("ok", (saved, note))
+        except Exception as exc:
+            st["result"] = ("error", f"Could not save the data:\n{exc}")
+        st["phase"] = "done"
 
     @staticmethod
-    def _exp_write_xlsx(path, csv_text):
+    def _exp_write_xlsx(path, csv_text, progress=None):
         """Write the received wide table into a formatted .xlsx.
 
         FrED sends a semicolon-delimited CSV with comma decimals (for Excel in
@@ -1593,7 +1711,14 @@ class FiberApp:
         row is bold white on a color per subsystem, and three native Excel
         line charts (Diameter, Temperature, Spooler RPM vs time - the same
         graphs the Pi shows on screen) are placed right next to the data.
+
+        ``progress``, if given, is called as ``progress(fraction, text)`` so a
+        loading bar can track the (potentially long) build.
         """
+        def report(frac, text):
+            if progress is not None:
+                progress(frac, text)
+
         try:
             from openpyxl import Workbook
             from openpyxl.chart import Reference, ScatterChart, Series
@@ -1605,8 +1730,9 @@ class FiberApp:
             wb = Workbook()
             ws = wb.active
             ws.title = "FrED Experiment"
+            total = max(1, csv_text.count("\n"))
             reader = csv.reader(io.StringIO(csv_text), delimiter=";")
-            for row in reader:
+            for i, row in enumerate(reader):
                 out = []
                 for cell in row:
                     c = cell.strip()
@@ -1618,10 +1744,14 @@ class FiberApp:
                     except ValueError:
                         out.append(cell)
                 ws.append(out)
+                if i % 250 == 0:
+                    report(0.05 + 0.70 * i / total,
+                           f"Building Excel... row {i:,} of {total:,}")
 
             headers = [str(c.value) if c.value is not None else ""
                        for c in ws[1]]
             n_rows = ws.max_row
+            report(0.78, "Formatting headers...")
 
             # ---- header row: bold white text on a color per subsystem ---- #
             def header_color(name):
@@ -1652,6 +1782,7 @@ class FiberApp:
             ws.freeze_panes = "A2"
 
             # ---- the Pi's three graphs as native Excel charts ------------ #
+            report(0.82, "Adding charts...")
             if n_rows > 2 and "Time (s)" in headers:
                 t_col = headers.index("Time (s)") + 1
                 xref = Reference(ws, min_col=t_col, min_row=2, max_row=n_rows)
@@ -1695,6 +1826,7 @@ class FiberApp:
                         ws.add_chart(chart, f"{anchor_col}{anchor_row}")
                         anchor_row += 19   # stack the charts vertically
 
+            report(0.88, "Writing the Excel file (this is the slow part)...")
             wb.save(path)
         except Exception as exc:
             return False, str(exc)

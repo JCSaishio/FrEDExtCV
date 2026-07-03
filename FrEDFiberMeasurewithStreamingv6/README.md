@@ -78,6 +78,12 @@ Then:
    click **Retrieve Data** — FrED sends the recorded CSV and it is saved as
    **`<name>.csv`** **and** **`<name>.xlsx`** in the chosen folder.
 
+   While this happens a **progress dialog blocks the app** so you know the
+   data is being processed: first an animated bar while waiting for FrED to
+   send the data (with a **Cancel** button, and a 60 s timeout if FrED never
+   answers), then a **loading bar** that tracks building and saving the Excel
+   file row by row. The app unlocks when the save is complete.
+
    The Excel file is **formatted automatically**: the header row is bold with
    a color per subsystem (time gray, temperature red, diameter blue, fan teal,
    extruder purple, spooler green), the top row stays frozen while you scroll,
