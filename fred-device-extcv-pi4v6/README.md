@@ -276,6 +276,18 @@ the laptop can disconnect/reconnect at any time. Calibrate the camera **on the
 computer** so the streamed `d` is already in millimetres (matching the Target
 Diameter range of 0.30–0.60 mm).
 
+**Jitter filter** — the raw camera measurement shakes with the fiber and has
+occasional single-frame mis-detections (jumps of up to ~0.17 mm in real runs).
+Each received measurement is therefore filtered on arrival: a **median over
+the last 5 messages** removes those short spikes, then a **3-point average**
+smooths the remaining jitter, adding only ~0.2–0.4 s of lag. Everything on the
+Pi — the diameter graph, the recorded experiment data, any control — uses the
+filtered value; the unfiltered measurement is still recorded in the experiment
+export as **`Diameter raw (mm)`** next to the filtered `Diameter (mm)`, so you
+can always see exactly what the filter did. Frames where no fiber was detected
+never enter the filter. Tuning: `MEDIAN_WINDOW` / `SMOOTH_WINDOW` in
+`external_diameter.py`.
+
 ## WiFi hotspot setup (`setup_hotspot.sh`)
 
 So the link works **without any university/router network**, the Pi creates its

@@ -28,12 +28,28 @@ Wire protocol (newline-delimited JSON, UTF-8 — identical to the USB version)::
 A keepalive line ``{"v": 1, "hb": true}`` may also be sent. Malformed lines are
 ignored. The link is optional: if no laptop connects, the interface still runs,
 simply reporting zero diameter until a stream arrives.
+
+Jitter filter
+-------------
+The camera measurement jitters (fiber vibration + occasional single-frame
+mis-detections: the real ``fred_experiment`` run showed typical steps of
+~0.01 mm with outlier jumps up to 0.17 mm). Every received measurement with
+``found=true`` is filtered on arrival: a median over the last 5 messages
+removes short spikes (anything lasting less than ~3 of the ~20 messages/s),
+then a 3-point average of the medians smooths the residual jitter. Total lag
+is ~0.2-0.4 s at the normal streaming rate - small next to the process
+dynamics. Undetected frames never enter the filter. ``get_latest()`` returns
+the FILTERED value - graphs, recording and any control all see the clean
+signal; ``get_latest_raw()`` returns the unfiltered measurement, which the
+experiment export records alongside the filtered one.
 """
 import json
 import socket
+import statistics
 import subprocess
 import threading
 import time
+from collections import deque
 from typing import TYPE_CHECKING, List, Tuple
 
 from database import Database
@@ -59,6 +75,10 @@ class ExternalDiameter:
     PROTOCOL_VERSION = 1
     STREAM_TIMEOUT = 2.0       # seconds without data before "no signal"
 
+    # Jitter filter over received measurements (see module docstring):
+    MEDIAN_WINDOW = 5          # median of the last N messages (despike)
+    SMOOTH_WINDOW = 3          # average of the last N medians (smooth)
+
     def __init__(self, target_diameter: "QDoubleSpinBox", gui: "UserInterface",
                  host: str = "0.0.0.0", port: int = STREAM_PORT) -> None:
         self.target_diameter = target_diameter
@@ -69,11 +89,14 @@ class ExternalDiameter:
         self.listening = False
         self.connected = False         # True while a laptop client is connected
         self.client_address = None     # (ip, port) of the connected laptop
-        self.latest_diameter = 0.0
+        self.latest_diameter = 0.0     # FILTERED value (what everything uses)
+        self.latest_raw = 0.0          # unfiltered, as received from the laptop
         self.latest_units = "mm"
         self.latest_found = False
         self.last_message_time = 0.0
         self.previous_time = 0.0
+        self._median_buf = deque(maxlen=self.MEDIAN_WINDOW)
+        self._smooth_buf = deque(maxlen=self.SMOOTH_WINDOW)
 
         self._server_sock = None
         self._client_sock = None
@@ -238,10 +261,18 @@ class ExternalDiameter:
             diameter = float(message.get("d", 0.0))
         except (TypeError, ValueError):
             return
+        found = bool(message.get("found", True))
         with self._lock:
-            self.latest_diameter = diameter
+            # Advance the filter on every DETECTED measurement message
+            # (~20/s). Undetected frames are kept out so a lost fiber cannot
+            # drag the filtered value around.
+            if found:
+                self._median_buf.append(diameter)
+                self._smooth_buf.append(statistics.median(self._median_buf))
+                self.latest_diameter = statistics.fmean(self._smooth_buf)
+            self.latest_raw = diameter
             self.latest_units = message.get("u", "mm")
-            self.latest_found = bool(message.get("found", True))
+            self.latest_found = found
             self.last_message_time = time.time()
 
     def _handle_command(self, mtype: str, message: dict) -> None:
@@ -261,10 +292,15 @@ class ExternalDiameter:
     # Public access
     # ------------------------------------------------------------------ #
     def get_latest(self) -> Tuple[float, bool, float]:
-        """Return (diameter, found, seconds_since_last_message)."""
+        """Return (FILTERED diameter, found, seconds_since_last_message)."""
         with self._lock:
             age = time.time() - self.last_message_time if self.last_message_time else float("inf")
             return self.latest_diameter, self.latest_found, age
+
+    def get_latest_raw(self) -> float:
+        """Return the last diameter exactly as received (no jitter filter)."""
+        with self._lock:
+            return self.latest_raw
 
     def is_streaming(self) -> bool:
         """True if a laptop is connected and a message arrived recently."""

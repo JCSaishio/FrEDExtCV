@@ -79,8 +79,14 @@ independently configurable extrusion rate. After recording ends everything
 stops **except the spooler**, which keeps coiling the extruded fiber for the
 user-set extra spooling time.
 
+The streamed diameter is **jitter-filtered on the Pi** as it arrives (median +
+short average: single-frame spikes removed, ~0.2–0.4 s lag); the export keeps
+both the filtered `Diameter (mm)` and the as-received `Diameter raw (mm)`.
+
 All data is timestamped on the Pi's clock (t = 0 at the start of recording) and
-returned on **Retrieve Data** as a semicolon-delimited CSV plus an xlsx copy.
+returned on **Retrieve Data** as a semicolon-delimited CSV plus an **xlsx copy
+with bold color-coded headers and native Excel charts** (Diameter, Temperature,
+Spooler RPM vs time — the Pi's three graphs) placed next to the data.
 FrED's graphs are cleared the instant recording starts, so they show exactly
 the exported window. While an experiment runs, **every** control on FrED's
 screen (start buttons, PID gains, setpoints, sliders) is disabled and shown

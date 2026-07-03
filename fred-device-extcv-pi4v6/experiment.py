@@ -46,11 +46,14 @@ class Experiment:
     ABORTED = "aborted"
 
     # One wide table: a single time column, then every measurement to the right.
+    # "Diameter (mm)" is the jitter-filtered signal (what the Pi graphs/uses);
+    # "Diameter raw (mm)" is the measurement exactly as streamed by the laptop.
     COLUMNS = ["Time (s)", "Temperature (C)", "Temp setpoint (C)",
                "Temp error (C)", "Temp PID output", "Temp Kp", "Temp Ki",
-               "Temp Kd", "Diameter (mm)", "Diameter setpoint (mm)",
-               "Fan duty (%)", "Extruder RPM", "Spooler setpoint (RPM)",
-               "Spooler RPM", "Spooler Kp", "Spooler Ki", "Spooler Kd"]
+               "Temp Kd", "Diameter (mm)", "Diameter raw (mm)",
+               "Diameter setpoint (mm)", "Fan duty (%)", "Extruder RPM",
+               "Spooler setpoint (RPM)", "Spooler RPM", "Spooler Kp",
+               "Spooler Ki", "Spooler Kd"]
 
     def __init__(self, gui) -> None:
         self.gui = gui
@@ -335,6 +338,7 @@ class Experiment:
         def last(lst):
             return lst[-1] if lst else ""
         diameter = self.gui.diameter_source.get_latest()[0]
+        diameter_raw = self.gui.diameter_source.get_latest_raw()
         self._rows.append([
             t - self.t0,
             last(Database.temperature_readings),
@@ -345,6 +349,7 @@ class Experiment:
             last(Database.temperature_ki),
             last(Database.temperature_kd),
             diameter,
+            diameter_raw,
             self.gui.get_target_diameter(),
             last(Database.fan_duty_cycle),
             last(Database.extruder_rpm),

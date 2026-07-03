@@ -1586,14 +1586,19 @@ class FiberApp:
 
     @staticmethod
     def _exp_write_xlsx(path, csv_text):
-        """Write the received wide table into one .xlsx sheet.
+        """Write the received wide table into a formatted .xlsx.
 
         FrED sends a semicolon-delimited CSV with comma decimals (for Excel in
-        es-MX). Numeric cells are converted back to real numbers so the sheet is
-        usable for charts; the header row stays as text.
+        es-MX). Numeric cells are converted back to real numbers, the header
+        row is bold white on a color per subsystem, and three native Excel
+        line charts (Diameter, Temperature, Spooler RPM vs time - the same
+        graphs the Pi shows on screen) are placed right next to the data.
         """
         try:
             from openpyxl import Workbook
+            from openpyxl.chart import Reference, ScatterChart, Series
+            from openpyxl.styles import Alignment, Font, PatternFill
+            from openpyxl.utils import get_column_letter
         except ImportError:
             return False, "openpyxl not installed (pip install openpyxl)"
         try:
@@ -1613,6 +1618,83 @@ class FiberApp:
                     except ValueError:
                         out.append(cell)
                 ws.append(out)
+
+            headers = [str(c.value) if c.value is not None else ""
+                       for c in ws[1]]
+            n_rows = ws.max_row
+
+            # ---- header row: bold white text on a color per subsystem ---- #
+            def header_color(name):
+                n = name.lower()
+                if n.startswith("time"):
+                    return "595959"        # gray
+                if n.startswith("temp"):
+                    return "C0504D"        # red
+                if n.startswith("diameter"):
+                    return "4472C4"        # blue
+                if n.startswith("fan"):
+                    return "31859C"        # teal
+                if n.startswith("extruder"):
+                    return "7030A0"        # purple
+                if n.startswith("spooler"):
+                    return "548235"        # green
+                return "444444"
+
+            for idx, name in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=idx)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor=header_color(name))
+                cell.alignment = Alignment(horizontal="center",
+                                           vertical="center", wrap_text=True)
+                ws.column_dimensions[get_column_letter(idx)].width = \
+                    max(11, min(20, len(name) + 2))
+            ws.row_dimensions[1].height = 30
+            ws.freeze_panes = "A2"
+
+            # ---- the Pi's three graphs as native Excel charts ------------ #
+            if n_rows > 2 and "Time (s)" in headers:
+                t_col = headers.index("Time (s)") + 1
+                xref = Reference(ws, min_col=t_col, min_row=2, max_row=n_rows)
+
+                def make_chart(title, y_title, series_names):
+                    chart = ScatterChart()
+                    chart.title = title
+                    chart.style = 13
+                    chart.x_axis.title = "Time (s)"
+                    chart.y_axis.title = y_title
+                    chart.x_axis.delete = False
+                    chart.y_axis.delete = False
+                    chart.height = 9
+                    chart.width = 20
+                    for name in series_names:
+                        if name not in headers:
+                            continue
+                        col = headers.index(name) + 1
+                        yref = Reference(ws, min_col=col, min_row=1,
+                                         max_row=n_rows)
+                        series = Series(yref, xref, title_from_data=True)
+                        series.marker.symbol = "none"
+                        series.smooth = False
+                        chart.series.append(series)
+                    return chart if chart.series else None
+
+                specs = [
+                    ("Diameter", "Diameter (mm)",
+                     ["Diameter (mm)", "Diameter raw (mm)",
+                      "Diameter setpoint (mm)"]),
+                    ("Temperature", "Temperature (C)",
+                     ["Temperature (C)", "Temp setpoint (C)"]),
+                    ("DC Spooling Motor", "Speed (RPM)",
+                     ["Spooler RPM", "Spooler setpoint (RPM)"]),
+                ]
+                anchor_col = get_column_letter(len(headers) + 2)
+                anchor_row = 2
+                for title, y_title, names in specs:
+                    chart = make_chart(title, y_title, names)
+                    if chart is not None:
+                        ws.add_chart(chart, f"{anchor_col}{anchor_row}")
+                        anchor_row += 19   # stack the charts vertically
+
             wb.save(path)
         except Exception as exc:
             return False, str(exc)

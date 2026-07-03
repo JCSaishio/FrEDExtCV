@@ -77,6 +77,20 @@ Then:
 2. When recording finishes (you don't have to wait for the extra spooling),
    click **Retrieve Data** — FrED sends the recorded CSV and it is saved as
    **`<name>.csv`** **and** **`<name>.xlsx`** in the chosen folder.
+
+   The Excel file is **formatted automatically**: the header row is bold with
+   a color per subsystem (time gray, temperature red, diameter blue, fan teal,
+   extruder purple, spooler green), the top row stays frozen while you scroll,
+   and **three native Excel charts — Diameter, Temperature and DC Spooling
+   Motor vs time, the same graphs FrED shows on its screen — are placed right
+   next to the data**, ready to zoom/edit like any Excel chart.
+
+   The diameter comes in two columns: **`Diameter (mm)`** is the
+   jitter-filtered signal FrED works with (a median-of-5 + short average
+   applied on the Pi as each measurement arrives, which removes single-frame
+   spikes and roughly halves the shake), and **`Diameter raw (mm)`** is the
+   measurement exactly as this laptop streamed it. Both appear in the
+   Diameter chart so you can see the filter's effect.
 3. **Abort** stops the experiment at any time and shuts down **every** system
    on FrED — heater, extruder, spooler and fan are all driven to zero (the red
    STOP buttons on FrED do the same). Even with no experiment running, Abort
