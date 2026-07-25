@@ -19,6 +19,21 @@ from matplotlib.figure import Figure
 from database import Database
 from external_diameter import ExternalDiameter
 from experiment import Experiment
+from signal_filter import (EMAFilter, ALPHA_TEMPERATURE, ALPHA_SPOOLER_RPM,
+                           rescale_alpha)
+
+# The control loops feed the plots at ~10 Hz (Extruder/Spooler SAMPLE_TIME = 0.1 s).
+# EMA coefficients for the two filtered plots (raise = less smoothing/less lag,
+# lower = smoother/more lag). Easy to tweak here.
+PLOT_RATE_HZ = 10.0
+# Temperature is slow: rescale the 50 Hz preset to 10 Hz to keep the SAME physical
+# smoothing (time constant ~0.65 s) -> alpha ~0.134.
+PLOT_ALPHA_TEMPERATURE = rescale_alpha(ALPHA_TEMPERATURE, 50.0, PLOT_RATE_HZ)
+# Spooler RPM: use the preset alpha directly. An EMA's noise-std reduction depends
+# only on alpha (not the rate), so this gives the same visible smoothing on the
+# graph as the 50 Hz path (~0.3 s lag at 10 Hz), instead of the near-passthrough
+# a time-constant rescale would give.
+PLOT_ALPHA_SPOOLER_RPM = ALPHA_SPOOLER_RPM
 
 
 class UserInterface():
@@ -83,10 +98,15 @@ class UserInterface():
         self.pending_graph_reset = False     # set by an experiment start
         self._controls_locked = False        # manual buttons disabled state
 
-        # --- Plots -------------------------------------------------------- #
+        # --- Plots (the graphed signals are EMA-filtered for a clean trace) --- #
+        # Diameter arrives already filtered from external_diameter.py (median+mean
+        # on the Pi), so its plot needs no extra filter. Temperature and spooler
+        # RPM are filtered here so the graphs show the filtered input.
         self.diameter_plot = self.Plot("Diameter", "Diameter (mm)")
-        self.motor_plot = self.Plot("DC Spooling Motor", "Speed (RPM)")
-        self.temperature_plot = self.Plot("Temperature", "Temperature (C)")
+        self.motor_plot = self.Plot("DC Spooling Motor", "Speed (RPM)",
+                                    alpha=PLOT_ALPHA_SPOOLER_RPM)
+        self.temperature_plot = self.Plot("Temperature", "Temperature (C)",
+                                          alpha=PLOT_ALPHA_TEMPERATURE)
 
         # --- Controls (widgets created, laid out later) ------------------- #
         self._create_controls()
@@ -635,11 +655,16 @@ class UserInterface():
         # the (expensive) canvas redraw and every sample reaches the CSV buffers.
         REDRAW_INTERVAL_MS = 100
 
-        def __init__(self, title: str, y_label: str) -> None:
+        def __init__(self, title: str, y_label: str, alpha: float = None) -> None:
             self.figure = Figure()
             self.axes = self.figure.add_subplot(111)
             super(UserInterface.Plot, self).__init__(self.figure)
             self.title = title
+            # EMA filter for the plotted signal (None -> plot the value as given,
+            # e.g. the diameter, which arrives already filtered). The filter only
+            # smooths what is DRAWN; the control loops and the CSV keep the raw
+            # value they compute.
+            self._filter = EMAFilter(alpha) if alpha else None
             self.axes.set_title(title)
             self.axes.set_xlabel("Time (s)")
             self.axes.set_ylabel(y_label)
@@ -658,6 +683,8 @@ class UserInterface():
             no matplotlib calls here (those happen in redraw() on the GUI
             thread). Keeps this microsecond-cheap so sampling stays at full rate.
             """
+            if self._filter is not None:      # smooth only the plotted signal
+                y = self._filter.update(y)
             self.x_data.append(x)
             self.y_data.append(y)
             self.setpoint_data.append(setpoint)
@@ -693,6 +720,8 @@ class UserInterface():
             self.y_data = []
             self.setpoint_data = []
             self._dirty = False
+            if self._filter is not None:      # re-seed the filter on a fresh run
+                self._filter.reset()
             self.progress_line.set_data([], [])
             self.setpoint_line.set_data([], [])
             self.progress_line.set_label(self.title)

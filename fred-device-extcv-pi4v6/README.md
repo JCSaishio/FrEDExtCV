@@ -6,7 +6,7 @@ WiFi** (no USB cable). This folder is a **stand-alone replacement** for the
 original `fred-device` code: copy it onto the Raspberry Pi 4, run the installer,
 and the machine works with no camera attached to the Pi.
 
-> **v3 — wireless link.** Earlier versions received the diameter over a USB
+> **WiFi link (since v3).** Earlier versions received the diameter over a USB
 > serial cable. In this version the **Pi runs as its own WiFi hotspot**, the
 > laptop joins it, and the diameter is streamed over a TCP socket. The
 > connection details (Wi-Fi name/password, the Pi's IP and port) are shown
@@ -21,7 +21,7 @@ This version is packaged to **install cleanly into a Python virtual environment
 
 ```bash
 # 1. Copy this whole folder onto the Pi, then open a terminal inside it:
-cd "fred-device-external-cv-pi4v3"
+cd "fred-device-extcv-pi4v6"
 
 # 2. Install everything (apt system packages + fred-venv + pip packages):
 bash setup_install.sh
@@ -108,7 +108,7 @@ the QtSvg module** (the `cannot import 'QtSvg' from 'PyQt5'` error).
   gone — every other subsystem (heater, stepper/extruder, DC spooling motor,
   fans) runs with no camera and no diameter stream connected.
 - **Diameter comes over WiFi.** A separate program on your computer
-  (*FrED Fiber Measure with Streaming v3*) measures the fiber from a camera
+  (*FrED Fiber Measure with Streaming v6*) measures the fiber from a camera
   connected to the computer and streams the diameter to the Pi over a wireless
   TCP socket. The interface treats those values exactly like the old camera
   readings (same plot, same `Database` buffers, same CSV export).
@@ -399,7 +399,7 @@ M2 (or leave the wrong pin) — but microstepping is the recommended setting.
 - **GUI doesn't appear / `qt.qpa.plugin` errors** — run from the Pi's desktop
   session (or with `DISPLAY` set), not a bare SSH session without X forwarding.
 - **No diameter graph** — make sure the laptop is joined to the `FrED_Pi`
-  Wi-Fi, then in *FrED Fiber Measure with Streaming v3* enter the Pi's IP/port,
+  Wi-Fi, then in *FrED Fiber Measure with Streaming v6* enter the Pi's IP/port,
   click **Connect** and **Start streaming**, and on the Pi press **Start
   Diameter/Camera Loop**.
 - **"Retrieve Data" waits forever on the laptop** — the recorded CSV travels
@@ -437,7 +437,7 @@ bash start_fred.sh
 ```
 
 Then, on your computer, join the `FrED_Pi` Wi-Fi, run *FrED Fiber Measure with
-Streaming v3*, enter the Pi's IP/port (shown on the Pi screen, default
+Streaming v6*, enter the Pi's IP/port (shown on the Pi screen, default
 `192.168.4.1` : `5005`), click **Connect** and **Start streaming**. On the Pi,
 press **Start Diameter/Camera Loop** to begin graphing.
 

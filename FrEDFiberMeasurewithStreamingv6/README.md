@@ -1,15 +1,15 @@
-# FrED Fiber Measure — WiFi Streaming (v3)
+# FrED Fiber Measure — WiFi Streaming (v6)
 
 Real-time fiber **diameter measurement** from a USB camera, with calibration,
 CSV data logging, **and live streaming of the diameter to a FrED Raspberry Pi
 over WiFi**. Built for a bright fiber imaged against a dark background (as in
 `Example/`).
 
-This is the companion to the `fred-device-external-cv-pi4v3` Raspberry Pi code:
+This is the companion to the `fred-device-extcv-pi4v6` Raspberry Pi code:
 the diameter is measured here, on your computer, and streamed wirelessly to the
 Pi, which graphs it in place of its old on-board camera feed.
 
-> **v3 — wireless link.** Earlier versions streamed over a USB serial cable.
+> **WiFi link (since v3).** Earlier versions streamed over a USB serial cable.
 > Now the **Pi runs its own WiFi hotspot** (`FrED_Pi`); this laptop joins it and
 > connects to the Pi by IP address — no cable, and no university network needed.
 
