@@ -1,5 +1,7 @@
 """File to control the spooling process"""
 import time
+from collections import deque
+
 import numpy as np
 import RPi.GPIO as GPIO
 import spidev 
@@ -15,12 +17,16 @@ class Spooler:
     
     PULSES_PER_REVOLUTION = 4704  # Updated for the new encoder 4*12*98
     READINGS_TO_AVERAGE = 10
-    # Spooler control period (s) = the ORIGINAL 0.1 s / 10 Hz. RPM is computed
-    # from the encoder delta over this period; the gains were tuned here and this
-    # gives clean, stable control. Running it faster (v5/v6 tried 50 Hz) shrank
-    # the per-sample encoder count, made the measured RPM noisy and the PID
-    # derivative unstable, so the control loops use this fixed period again. Data
-    # logging is handled separately, so this does not limit recorded data density.
+    # The control/monitor loops run at the interface's Sampling rate
+    # (gui.get_sample_period(), e.g. 50 Hz) - the same rate the data is logged
+    # at. The speed, however, is always measured over RPM_WINDOW of encoder
+    # history: v5/v6 measured it over one 20 ms period, which cut the counts
+    # per reading 5x, made the RPM noisy and the motor unstable. Measuring over
+    # the original 0.1 s keeps the reading as clean as the tuned 10 Hz setup
+    # while control and logging update 5x more often. At 10 Hz the maths is
+    # exactly the original one-period calculation.
+    RPM_WINDOW = 0.1
+    # Original 10 Hz period; still used by calibrate().
     SAMPLE_TIME = 0.1
     DIAMETER_PREFORM = 7
     DIAMETER_SPOOL = 15.2
@@ -47,6 +53,9 @@ class Spooler:
         self.integral_diameter = 0.0
         self.previous_error_diameter = 0.0
         self.previous_position = 0
+        # (time, encoder position) samples covering the last RPM_WINDOW; the
+        # first entry mirrors previous_time/previous_position above.
+        self._encoder_history = deque([(0.0, 0)])
         self.integral_motor = 0.0
         self.previous_error_motor = 0.0
 
@@ -89,6 +98,21 @@ class Spooler:
         count_value = (count_1[0] << 24) + (count_2[0] << 16) + (count_3[0] << 8) + count_4[0]
         return count_value
 
+    def _windowed_delta(self, current_time: float, current_position: int):
+        """Encoder (delta_position, delta_time) over the last ~RPM_WINDOW.
+
+        The reference is the newest stored sample at least RPM_WINDOW old, so
+        at 10 Hz it is simply the previous sample (the original calculation)
+        and at 50 Hz it is the sample ~5 periods back.
+        """
+        history = self._encoder_history
+        history.append((current_time, current_position))
+        while (len(history) > 2
+               and history[1][0] <= current_time - Spooler.RPM_WINDOW):
+            history.popleft()
+        ref_time, ref_position = history[0]
+        return current_position - ref_position, current_time - ref_time
+
     def start(self, frequency: float, duty_cycle: float) -> None:
         """Start the DC Motor PWM"""
         self.pwm = GPIO.PWM(Spooler.PWM_PIN, frequency)
@@ -121,13 +145,14 @@ class Spooler:
         Used by the interface's monitor mode to observe the spooler speed with
         no control output applied (the motor is held at zero duty).
         """
-        if current_time - self.previous_time <= Spooler.SAMPLE_TIME:
+        if current_time - self.previous_time <= self.gui.get_sample_period():
             return
         try:
             current_position = self.read_encoder()
             delta_time = current_time - self.previous_time
-            delta_position = current_position - self.previous_position
-            current_rpm = (delta_position / Spooler.PULSES_PER_REVOLUTION) * (60 / delta_time)
+            delta_position, rpm_dt = self._windowed_delta(current_time,
+                                                          current_position)
+            current_rpm = (delta_position / Spooler.PULSES_PER_REVOLUTION) * (60 / rpm_dt)
             if abs(current_rpm) > 65:
                 current_rpm = 0
             self.previous_position = current_position
@@ -169,19 +194,20 @@ class Spooler:
     
     def dc_motor_close_loop_control(self, current_time: float) -> None:
         """Closed loop control of the DC motor using PID"""
-        if current_time - self.previous_time <= Spooler.SAMPLE_TIME:
+        if current_time - self.previous_time <= self.gui.get_sample_period():
             return
-            
+
         try:
             if not self.motor_calibration:
                 self.gui.show_message("Motor calibration data not found",
                                     "Please calibrate the motor.")
                 self.motor_calibration = True
-            # Read current position and calculate RPM
+            # Read current position and calculate RPM (over RPM_WINDOW)
             current_position = self.read_encoder()
             delta_time = current_time - self.previous_time
-            delta_position = current_position - self.previous_position
-            current_rpm = -(delta_position / Spooler.PULSES_PER_REVOLUTION) * (60 / delta_time)
+            delta_position, rpm_dt = self._windowed_delta(current_time,
+                                                          current_position)
+            current_rpm = -(delta_position / Spooler.PULSES_PER_REVOLUTION) * (60 / rpm_dt)
             if abs(current_rpm) > 65:
                 current_rpm = 0
             
@@ -228,7 +254,11 @@ class Spooler:
 
 
     def motor_control_loop(self, current_time: float) -> None:
-        """Closed loop control of the DC motor for desired diameter"""
+        """Closed loop control of the DC motor for desired diameter.
+
+        UNUSED legacy code (never called, and incomplete: the diameter gains
+        are undefined). Since v7 the diameter is not available on the Pi.
+        """
         if current_time - self.previous_time <= Spooler.SAMPLE_TIME:
             return
         try:
@@ -353,18 +383,19 @@ class Spooler:
 
     def dc_motor_open_loop_control(self, current_time: float) -> None:
         """Open loop control of the DC motor using PWM"""
-        if current_time - self.previous_time <= Spooler.SAMPLE_TIME:
+        if current_time - self.previous_time <= self.gui.get_sample_period():
             return
-            
+
         try:
             pwm_value = self.gui.get_dc_motor_pwm()
             delta_time = current_time - self.previous_time
             self.previous_time = current_time
-            
-            # Measure current RPM
+
+            # Measure current RPM (over RPM_WINDOW)
             current_position = self.read_encoder()
-            delta_position = current_position - self.previous_position
-            current_rpm = (delta_position / Spooler.PULSES_PER_REVOLUTION) * (60 / delta_time)
+            delta_position, rpm_dt = self._windowed_delta(current_time,
+                                                          current_position)
+            current_rpm = (delta_position / Spooler.PULSES_PER_REVOLUTION) * (60 / rpm_dt)
             
             #update previous values
             self.previous_position = current_position

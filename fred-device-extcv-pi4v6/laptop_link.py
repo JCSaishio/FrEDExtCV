@@ -1,106 +1,96 @@
-"""Receive fiber diameter measurements streamed over WiFi from an external PC.
+"""WiFi command link between the FrED Pi and the laptop (v7).
 
-This is the **WiFi (TCP) variant** of the diameter link. The fiber diameter is
-measured on a separate computer (see the *FrED Fiber Measure with Streaming v3*
-program) and streamed to the Raspberry Pi over a wireless TCP socket instead of
-a USB cable.
+Since v7 the fiber diameter is measured, graphed and recorded entirely on the
+laptop - it is NOT streamed to the Pi any more, so the Pi's CPU goes to the
+temperature / spooler control loops and their two graphs. Once an experiment
+has been sent, this link is practically dormant: it only carries a few short
+command messages and a clock-sync ping every few seconds.
 
 The Pi is the **server**: it runs as a WiFi hotspot (see ``setup_hotspot.sh``)
-and listens on a TCP port. The laptop joins the hotspot and connects to the Pi
-as a client, then streams measurements. A background thread accepts the client
-and reads the incoming messages, exposing the most recent diameter.
+and listens on a TCP port; the laptop joins the hotspot and connects as a
+client. Messages are newline-delimited JSON objects with a ``type`` field.
 
-:meth:`ExternalDiameter.update` is a drop-in replacement for the old
-``FiberCamera.camera_feedback`` call: it pushes the latest reading into the same
-:class:`~database.Database` buffers and the diameter plot, so the rest of the
-device code does not need to know where the number came from.
+Laptop -> Pi::
 
-Wire protocol (newline-delimited JSON, UTF-8 — identical to the USB version)::
+    {"type": "experiment", "params": {...}}   start an automated run
+    {"type": "start_now", "params": {...}}    "Start recording now": jump
+                                              straight to RECORDING (or, with
+                                              no run active, start this run
+                                              directly in RECORDING)
+    {"type": "abort"}                         stop every system
+    {"type": "get_data"}                      send the recorded table back
+    {"type": "sync", "id": n, "t1": t}        clock-sync ping
 
-    {"v": 1, "d": 0.352, "u": "mm", "t": 12.345, "found": true}
+Pi -> laptop::
 
-    v      protocol version (int)
-    d      diameter value, in the units given by ``u``
-    u      unit string ("mm" or "px")
-    t      sender elapsed seconds (informational)
-    found  whether a fiber was detected in that frame
+    {"type": "status", "phase", "remaining", "message", "data_ready", ["t0"]}
+    {"type": "data", "name", "b64", "meta"}   recorded table (CSV, base64)
+    {"type": "event", "event": "no_data", "message"}
+    {"type": "sync_reply", "id", "t1", "t2", "t3", "boot"}
 
-A keepalive line ``{"v": 1, "hb": true}`` may also be sent. Malformed lines are
-ignored. The link is optional: if no laptop connects, the interface still runs,
-simply reporting zero diameter until a stream arrives.
+Clock sync
+----------
+Each machine timestamps its own samples on its own monotonic clock. The laptop
+sends a ping stamped t1 (laptop clock); the Pi stamps when the ping arrived
+(t2) and when the reply leaves (t3) on its experiment clock (``gui.now()``, the
+same clock as every recorded row); the laptop stamps the reply's arrival (t4).
+NTP maths then gives the Pi-minus-laptop offset ((t2 - t1) + (t3 - t4)) / 2
+with an error bound of half the network round trip. That lets the laptop place
+the Pi's recording start (``t0``, reported in Pi time) on its own clock, so the
+camera data and FrED's data share the same t = 0 regardless of WiFi latency.
+``boot`` identifies this run of the Pi program (i.e. its clock origin) so sync
+samples from an earlier Pi session are never mixed in.
 
-Jitter filter
--------------
-The camera measurement jitters (fiber vibration + occasional single-frame
-mis-detections: the real ``fred_experiment`` run showed typical steps of
-~0.01 mm with outlier jumps up to 0.17 mm). Every received measurement with
-``found=true`` is filtered on arrival: a median over the last 5 messages
-removes short spikes (anything lasting less than ~3 of the ~20 messages/s),
-then a 3-point average of the medians smooths the residual jitter. Total lag
-is ~0.2-0.4 s at the normal streaming rate - small next to the process
-dynamics. Undetected frames never enter the filter. ``get_latest()`` returns
-the FILTERED value - graphs, recording and any control all see the clean
-signal; ``get_latest_raw()`` returns the unfiltered measurement, which the
-experiment export records alongside the filtered one.
+Diameter lines sent by an older laptop app (``{"v": 1, "d": ...}``) are
+ignored.
 """
 import json
 import socket
-import statistics
 import subprocess
 import threading
 import time
-from collections import deque
-from typing import TYPE_CHECKING, List, Tuple
-
-from database import Database
+import uuid
+from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from PyQt5.QtWidgets import QDoubleSpinBox
     from user_interface import UserInterface
 
 # --------------------------------------------------------------------------- #
 # Hotspot / network defaults. These MUST match what setup_hotspot.sh configures
-# and what the laptop app (FrED Fiber Measure with Streaming v3) is pre-filled
-# with, so the connection details shown on screen are correct.
+# and what the laptop app is pre-filled with, so the connection details shown
+# on screen are correct.
 # --------------------------------------------------------------------------- #
 HOTSPOT_SSID = "FrED_Pi"
 HOTSPOT_PASSWORD = "fredfiber123"
 HOTSPOT_IP = "192.168.4.1"       # the Pi's address while acting as the hotspot
-STREAM_PORT = 5005               # TCP port the laptop streams to
+LINK_PORT = 5005                 # TCP port the laptop connects to
 
 
-class ExternalDiameter:
-    """Receive streamed fiber diameter over a WiFi TCP socket (Pi = server)."""
+class LaptopLink:
+    """Serve the laptop's command connection over WiFi (Pi = server)."""
 
-    PROTOCOL_VERSION = 1
-    STREAM_TIMEOUT = 2.0       # seconds without data before "no signal"
     READ_TIMEOUT = 0.5         # recv poll period on the client socket
     SEND_TIMEOUT = 30.0        # deadline for one outgoing message (the
                                # recorded CSV is >1 MB in a single line and
                                # can NOT finish within READ_TIMEOUT on WiFi)
+    IP_CACHE_S = 10.0          # re-query the Pi's IP addresses at most this
+                               # often (it spawns a process, and the status
+                               # label refreshes twice a second)
 
-    # Jitter filter over received measurements (see module docstring):
-    MEDIAN_WINDOW = 5          # median of the last N messages (despike)
-    SMOOTH_WINDOW = 3          # average of the last N medians (smooth)
-
-    def __init__(self, target_diameter: "QDoubleSpinBox", gui: "UserInterface",
-                 host: str = "0.0.0.0", port: int = STREAM_PORT) -> None:
-        self.target_diameter = target_diameter
+    def __init__(self, gui: "UserInterface", host: str = "0.0.0.0",
+                 port: int = LINK_PORT) -> None:
         self.gui = gui
         self.host = host               # 0.0.0.0 -> listen on every interface
         self.port = port
+        self.boot_id = uuid.uuid4().hex[:12]   # this Pi session's clock origin
 
         self.listening = False
         self.connected = False         # True while a laptop client is connected
         self.client_address = None     # (ip, port) of the connected laptop
-        self.latest_diameter = 0.0     # FILTERED value (what everything uses)
-        self.latest_raw = 0.0          # unfiltered, as received from the laptop
-        self.latest_units = "mm"
-        self.latest_found = False
-        self.last_message_time = 0.0
-        self.previous_time = 0.0
-        self._median_buf = deque(maxlen=self.MEDIAN_WINDOW)
-        self._smooth_buf = deque(maxlen=self.SMOOTH_WINDOW)
+        self.last_message_time = 0.0   # time.monotonic() of the last message
+
+        self._ips: List[str] = []
+        self._ips_time = float("-inf")
 
         self._server_sock = None
         self._client_sock = None
@@ -113,7 +103,7 @@ class ExternalDiameter:
         self._thread.start()
 
     # ------------------------------------------------------------------ #
-    # Sending messages back to the laptop (status, recorded data)
+    # Sending messages back to the laptop (status, recorded data, sync)
     # ------------------------------------------------------------------ #
     def send_message(self, obj: dict) -> bool:
         """Send one newline-delimited JSON object to the connected laptop."""
@@ -139,8 +129,8 @@ class ExternalDiameter:
                 # so the stream is unrecoverable - close the connection so the
                 # laptop sees a clean disconnect and can reconnect fresh,
                 # instead of silently receiving garbage forever.
-                print(f"[ExternalDiameter] Send failed ({exc}); closing the "
-                      "client connection so the laptop can reconnect.")
+                print(f"[LaptopLink] Send failed ({exc}); closing the client "
+                      "connection so the laptop can reconnect.")
                 try:
                     sock.close()
                 except Exception:
@@ -148,7 +138,7 @@ class ExternalDiameter:
                 return False
 
     def _send_recorded_data(self) -> None:
-        """Respond to a laptop 'get_data' request with the experiment CSV."""
+        """Respond to a laptop 'get_data' request with the experiment table."""
         experiment = getattr(self.gui, "experiment", None)
         payload = experiment.data_payload() if experiment else None
         if payload is None:
@@ -157,12 +147,29 @@ class ExternalDiameter:
         else:
             self.send_message(payload)
 
+    def _reply_sync(self, message: dict, t_arrival: float) -> None:
+        """Answer a clock-sync ping straight away (see the module doc)."""
+        self.send_message({
+            "type": "sync_reply",
+            "id": message.get("id"),
+            "t1": message.get("t1"),
+            "t2": t_arrival,             # ping arrived (Pi experiment clock)
+            "t3": self.gui.now(),        # reply leaves (Pi experiment clock)
+            "boot": self.boot_id,
+        })
+
     # ------------------------------------------------------------------ #
     # Network helpers
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def local_ip_addresses() -> List[str]:
-        """Return this Pi's non-loopback IPv4 addresses (hotspot IP first)."""
+    def local_ip_addresses(self) -> List[str]:
+        """Return this Pi's non-loopback IPv4 addresses (hotspot IP first).
+
+        Cached for IP_CACHE_S seconds: ``hostname -I`` spawns a process, and
+        the status label is refreshed twice a second.
+        """
+        now = time.monotonic()
+        if now - self._ips_time < self.IP_CACHE_S:
+            return list(self._ips)
         ips: List[str] = []
         try:
             out = subprocess.check_output(["hostname", "-I"], text=True)
@@ -179,7 +186,8 @@ class ExternalDiameter:
                 ips = []
         # Show the hotspot address first if the Pi is running as the AP.
         ips.sort(key=lambda ip: (not ip.startswith("192.168.4."), ip))
-        return ips
+        self._ips, self._ips_time = ips, now
+        return list(ips)
 
     def primary_ip(self) -> str:
         """Best guess at the address the laptop should connect to."""
@@ -201,10 +209,10 @@ class ExternalDiameter:
             sock.listen(1)
             self._server_sock = sock
             self.listening = True
-            print(f"[ExternalDiameter] Listening on {self.host}:{self.port}")
+            print(f"[LaptopLink] Listening on {self.host}:{self.port}")
             return True
         except Exception as exc:
-            print(f"[ExternalDiameter] Could not open server socket: {exc}")
+            print(f"[LaptopLink] Could not open server socket: {exc}")
             self.listening = False
             return False
 
@@ -220,17 +228,22 @@ class ExternalDiameter:
             except socket.timeout:
                 continue
             except Exception as exc:
-                print(f"[ExternalDiameter] Accept error: {exc}")
+                print(f"[LaptopLink] Accept error: {exc}")
                 time.sleep(1.0)
                 continue
 
-            print(f"[ExternalDiameter] Laptop connected from {addr[0]}:{addr[1]}")
+            print(f"[LaptopLink] Laptop connected from {addr[0]}:{addr[1]}")
             client.settimeout(self.READ_TIMEOUT)
+            # Small messages (sync replies) must leave immediately.
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             with self._lock:
                 self._client_sock = client
                 self.connected = True
                 self.client_address = addr
                 self._buffer = b""
+            experiment = getattr(self.gui, "experiment", None)
+            if experiment is not None:
+                experiment.announce()    # laptop learns the current phase
             self._read_client(client)
             # Client disconnected -> back to waiting for a new one.
             with self._lock:
@@ -241,26 +254,27 @@ class ExternalDiameter:
                 client.close()
             except Exception:
                 pass
-            print("[ExternalDiameter] Laptop disconnected; waiting for a new "
+            print("[LaptopLink] Laptop disconnected; waiting for a new "
                   "connection...")
 
     def _read_client(self, client: socket.socket) -> None:
         while not self._stop.is_set():
             try:
-                data = client.recv(512)
+                data = client.recv(4096)
             except socket.timeout:
                 continue
             except Exception as exc:
-                print(f"[ExternalDiameter] Read error: {exc}")
+                print(f"[LaptopLink] Read error: {exc}")
                 return
             if not data:        # peer closed the connection
                 return
+            t_arrival = self.gui.now()    # stamped for clock-sync pings
             self._buffer += data
             while b"\n" in self._buffer:
                 line, self._buffer = self._buffer.split(b"\n", 1)
-                self._handle_line(line)
+                self._handle_line(line, t_arrival)
 
-    def _handle_line(self, raw: bytes) -> None:
+    def _handle_line(self, raw: bytes, t_arrival: float) -> None:
         try:
             text = raw.decode("utf-8", errors="ignore").strip()
             if not text:
@@ -268,46 +282,31 @@ class ExternalDiameter:
             message = json.loads(text)
         except (ValueError, json.JSONDecodeError):
             return  # ignore malformed lines / partial frames
-
-        # Experiment commands from the laptop (v6).
+        if not isinstance(message, dict):
+            return
+        with self._lock:
+            self.last_message_time = time.monotonic()
         mtype = message.get("type")
         if mtype:
-            self._handle_command(mtype, message)
-            return
+            self._handle_command(mtype, message, t_arrival)
+        # Anything without a type (e.g. diameter lines from an older laptop
+        # app) is ignored: the diameter now stays on the laptop.
 
-        if message.get("hb"):  # heartbeat / keepalive
-            with self._lock:
-                self.last_message_time = time.time()
+    def _handle_command(self, mtype: str, message: dict,
+                        t_arrival: float) -> None:
+        """Dispatch a command received from the laptop."""
+        if mtype == "sync":
+            self._reply_sync(message, t_arrival)
             return
-        if "d" not in message:
-            return
-        try:
-            diameter = float(message.get("d", 0.0))
-        except (TypeError, ValueError):
-            return
-        found = bool(message.get("found", True))
-        with self._lock:
-            # Advance the filter on every DETECTED measurement message
-            # (~20/s). Undetected frames are kept out so a lost fiber cannot
-            # drag the filtered value around.
-            if found:
-                self._median_buf.append(diameter)
-                self._smooth_buf.append(statistics.median(self._median_buf))
-                self.latest_diameter = statistics.fmean(self._smooth_buf)
-            self.latest_raw = diameter
-            self.latest_units = message.get("u", "mm")
-            self.latest_found = found
-            self.last_message_time = time.time()
-
-    def _handle_command(self, mtype: str, message: dict) -> None:
-        """Dispatch an experiment command received from the laptop."""
         experiment = getattr(self.gui, "experiment", None)
+        if experiment is None:
+            return
         if mtype == "experiment":
-            if experiment is not None:
-                experiment.start(message.get("params", {}))
+            experiment.start(message.get("params", {}))
+        elif mtype == "start_now":
+            experiment.start_now(message.get("params", {}))
         elif mtype == "abort":
-            if experiment is not None:
-                experiment.abort()
+            experiment.abort()
         elif mtype == "get_data":
             self._send_recorded_data()
         # unknown types are ignored
@@ -315,24 +314,6 @@ class ExternalDiameter:
     # ------------------------------------------------------------------ #
     # Public access
     # ------------------------------------------------------------------ #
-    def get_latest(self) -> Tuple[float, bool, float]:
-        """Return (FILTERED diameter, found, seconds_since_last_message)."""
-        with self._lock:
-            age = time.time() - self.last_message_time if self.last_message_time else float("inf")
-            return self.latest_diameter, self.latest_found, age
-
-    def get_latest_raw(self) -> float:
-        """Return the last diameter exactly as received (no jitter filter)."""
-        with self._lock:
-            return self.latest_raw
-
-    def is_streaming(self) -> bool:
-        """True if a laptop is connected and a message arrived recently."""
-        with self._lock:
-            if not self.connected or not self.last_message_time:
-                return False
-            return (time.time() - self.last_message_time) < self.STREAM_TIMEOUT
-
     def connection_info(self) -> dict:
         """Everything the GUI needs to show the user how to connect."""
         with self._lock:
@@ -351,35 +332,12 @@ class ExternalDiameter:
     def status_text(self) -> str:
         """Human-readable status string for the GUI."""
         if not self.listening:
-            return f"Diameter link: starting WiFi server on port {self.port}..."
+            return f"Laptop link: starting WiFi server on port {self.port}..."
         if not self.connected:
-            return (f"Diameter link: waiting for laptop on "
+            return (f"Laptop link: waiting for laptop on "
                     f"{self.primary_ip()}:{self.port}")
-        if self.is_streaming():
-            diameter, found, _ = self.get_latest()
-            if found:
-                return f"Diameter link: streaming - {diameter:.4f} mm"
-            return "Diameter link: streaming - no fiber detected"
-        return "Diameter link: laptop connected, waiting for data..."
-
-    # ------------------------------------------------------------------ #
-    # Hardware-loop hook (replaces FiberCamera.camera_feedback)
-    # ------------------------------------------------------------------ #
-    def update(self, current_time: float) -> None:
-        """Feed the latest streamed diameter into the plot and the database."""
-        try:
-            diameter, _found, _age = self.get_latest()
-            target = self.gui.get_target_diameter()
-
-            self.gui.diameter_plot.update_plot(current_time, diameter, target)
-
-            Database.camera_timestamps.append(current_time)
-            Database.diameter_readings.append(diameter)
-            Database.diameter_setpoint.append(target)
-            Database.diameter_delta_time.append(current_time - self.previous_time)
-            self.previous_time = current_time
-        except Exception as exc:
-            print(f"Error in external diameter update: {exc}")
+        return ("Laptop link: connected (commands only - the diameter is "
+                "measured and recorded on the laptop)")
 
     def close(self) -> None:
         """Stop the server thread and release the sockets."""

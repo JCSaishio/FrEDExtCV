@@ -1,37 +1,42 @@
 # $${\color{red}MIT}$$ $${\color{red}FrED}$$ — External CV variant, **WiFi** (Raspberry Pi 4)
 
 Raspberry Pi code for the Fiber Extrusion Device, modified so that the fiber
-**diameter is measured on an external computer** and streamed to the Pi **over
-WiFi** (no USB cable). This folder is a **stand-alone replacement** for the
-original `fred-device` code: copy it onto the Raspberry Pi 4, run the installer,
-and the machine works with no camera attached to the Pi.
+**diameter is measured on an external computer** (the laptop CV app). This
+folder is a **stand-alone replacement** for the original `fred-device` code:
+copy it onto the Raspberry Pi 4, run the installer, and the machine works with
+no camera attached to the Pi.
 
-> **WiFi link (since v3).** Earlier versions received the diameter over a USB
-> serial cable. In this version the **Pi runs as its own WiFi hotspot**, the
-> laptop joins it, and the diameter is streamed over a TCP socket. The
-> connection details (Wi-Fi name/password, the Pi's IP and port) are shown
-> right on the Pi's screen so you can connect from the laptop with no guesswork.
+> **v7 — the Pi does control only.** The diameter is no longer streamed to
+> the Pi at all: the laptop measures, graphs and records it at the full camera
+> rate. The Pi runs the heater / stepper / spooler / fan control loops and
+> graphs **temperature and spooler speed**. It still runs its own WiFi hotspot
+> so the laptop can connect, send experiments and retrieve the data — once an
+> experiment is sent, that link is essentially dormant (a few short commands
+> and a tiny clock-sync ping every 2 s).
 
-This version is packaged to **install cleanly into a Python virtual environment
-(`fred-venv`) on a Raspberry Pi 4**. The main program is **`main.py`**.
+This version installs into a Python virtual environment (`fred-venv`) on a
+Raspberry Pi 4. The main program is **`main.py`**.
 
 ---
 
 ## Quick start (Raspberry Pi 4)
 
 ```bash
-# 1. Copy this whole folder onto the Pi, then open a terminal inside it:
-cd "fred-device-extcv-pi4v6"
+# 1. Open a terminal inside this folder (the repo is cloned on the Pi):
+cd fred-device-extcv-pi4v6
 
-# 2. Install everything (apt system packages + fred-venv + pip packages):
+# 2. Install everything (only on a fresh Pi):
 bash setup_install.sh
 
-# 3. Turn the Pi into a WiFi hotspot the laptop can join (one time / per boot):
+# 3. Turn the Pi into a WiFi hotspot the laptop can join (once per boot):
 bash setup_hotspot.sh
 
-# 4. Run the program (this activates fred-venv and runs main.py):
+# 4. Run the program (activates fred-venv and runs main.py):
 bash start_fred.sh
 ```
+
+To update an existing Pi to the latest code: `git pull` in the repo folder,
+then restart the program (no reinstall needed).
 
 The hotspot it creates is:
 
@@ -41,16 +46,10 @@ The hotspot it creates is:
 | **Password** | `fredfiber123` |
 | **Pi address** | `192.168.4.1` (port `5005`) |
 
-These exact details are also shown live in the **Diameter (External CV - WiFi)**
-panel of the Pi interface, so you never have to look them up.
-
-That's it. The installer creates the `fred-venv` virtual environment **inside
-this folder**, installs every required library, and verifies that they all
-import before finishing.
+These details are also shown live in the **Laptop Link (WiFi)** panel of the Pi
+interface.
 
 ### Running it manually with the venv
-
-If you prefer to do it by hand (the program always runs from inside the venv):
 
 ```bash
 source fred-venv/bin/activate     # activate the virtual environment
@@ -58,21 +57,16 @@ python main.py                    # run the main program
 deactivate                        # (optional) leave the venv when done
 ```
 
-> The activation command is exactly **`source fred-venv/bin/activate`**, run
-> from inside this folder. Once activated your prompt shows `(fred-venv)`.
-
 ---
 
 ## Required libraries
 
-Everything the program imports, and how it gets installed on the Pi 4.
-
 ### Installed from `apt` (system packages, shared into the venv)
 
-These are built for the Pi by `apt` and made visible to `fred-venv` because the
-venv is created with `--system-site-packages`. They are **not** pip-installed,
-because building PyQt5 from pip on the Pi is slow and frequently ships **without
-the QtSvg module** (the `cannot import 'QtSvg' from 'PyQt5'` error).
+These are made visible to `fred-venv` because the venv is created with
+`--system-site-packages`. They are **not** pip-installed, because building
+PyQt5 from pip on the Pi is slow and frequently ships **without the QtSvg
+module** (the `cannot import 'QtSvg' from 'PyQt5'` error).
 
 | apt package | Provides | Why |
 |---|---|---|
@@ -97,35 +91,25 @@ the QtSvg module** (the `cannot import 'QtSvg' from 'PyQt5'` error).
 ### Python standard library (no install needed)
 
 `threading`, `time`, `math`, `sys`, `socket` (the WiFi link), `subprocess`,
-`json`, `typing`, `csv`, `collections` — all bundled with Python 3.
+`json`, `uuid`, `typing`, `csv`, `collections` — all bundled with Python 3.
 
 ---
 
 ## What changed vs. the original `fred-device`
 
-- **No camera dependency.** The original code opened `cv2.VideoCapture(0)` at
-  start-up and the interface would not run without a camera. That dependency is
-  gone — every other subsystem (heater, stepper/extruder, DC spooling motor,
-  fans) runs with no camera and no diameter stream connected.
-- **Diameter comes over WiFi.** A separate program on your computer
-  (*FrED Fiber Measure with Streaming v6*) measures the fiber from a camera
-  connected to the computer and streams the diameter to the Pi over a wireless
-  TCP socket. The interface treats those values exactly like the old camera
-  readings (same plot, same `Database` buffers, same CSV export).
-- **No camera UI.** The raw/processed image panes and all the image-processing
-  controls (erode / dilate / Gaussian / binary, Canny and Hough sliders, camera
-  calibration) were removed — those now live on the computer.
-- **"Start Diameter/Camera Loop" button kept.** Press it to begin graphing the
-  streamed diameter on the Pi (it toggles `diameter_loop_enabled`).
-- **Redesigned layout.** The space the camera feed used to occupy now holds
-  larger **Diameter**, **DC Motor** and **Temperature** graphs on the left, with
-  all controls and the CSV export grouped into panels on the right.
+- **No camera and no diameter on the Pi.** The original code opened
+  `cv2.VideoCapture(0)` at start-up. Here the fiber is measured on the laptop,
+  which also graphs and records the diameter (v7). Every Pi subsystem (heater,
+  stepper/extruder, DC spooling motor, fans) runs without it.
+- **No camera UI.** The image panes and image-processing controls were removed
+  — those live on the laptop.
+- **Layout.** Two large graphs on the left — **DC Motor** (spooler RPM) and
+  **Temperature** — with every control grouped into panels on the right.
 
 ## Per-subsystem STOP buttons
 
-Each actuator now has its own red **STOP** button so you can halt it without
-closing the program. Stopping drives that output to **0** immediately (it isn't
-left at its last value):
+Each actuator has its own red **STOP** button so you can halt it without
+closing the program. Stopping drives that output to **0** immediately:
 
 | Button | Where | Effect |
 |---|---|---|
@@ -134,159 +118,131 @@ left at its last value):
 | **STOP Stepper** | Extrusion Motor panel | sets the extrusion speed to 0 and zeroes the stepper output |
 | **STOP / Start Fan** | Cooling Fan panel | holds the fan at 0% (toggles back on without losing the slider value) |
 
-Restart heater/motor with their existing Start buttons; restart the stepper by
-raising **Extrusion Motor Speed**.
+Restart heater/motor with their Start buttons; restart the stepper by raising
+**Extrusion Motor Speed**.
+
+## Spooler PID gain limits
+
+The spooling-motor gains accept **Kp 0–1, Ki 0–15, Kd 0–0.05** (step 0.001
+for Kd). Gains sent in an experiment from the laptop are held to the same
+limits (`UserInterface.MOTOR_GAIN_LIMITS`).
 
 ## Passive Monitoring (read-only)
 
-The **Passive Monitoring** panel has a **Start Monitoring (no output)** button
-that graphs the **heater temperature** and **spooler RPM** while driving **no
-output** to the system — no heating, no motors. It's meant for watching how the
-heater temperature behaves on its own (its current value and trend) with no
-control input. Starting any control loop is blocked while monitoring is on; stop
-monitoring first.
+**Start Monitoring (no output)** graphs the **heater temperature** and
+**spooler RPM** while driving **no output** — no heating, no motors. Starting
+a control loop is blocked while monitoring is on; stop monitoring first.
 
-## Graphs: Reset button & sampling rate (v5)
+## Graphs & sampling rate
 
-**Reset Graphs button** — the **Graphs** panel has a **Reset Graphs** button that
-clears the on-screen **Diameter**, **Temperature** and **DC Motor** plots so a
-new run can be seen cleanly. It only clears what is drawn; data already logged
-for the CSV export is kept.
+**Reset Graphs** clears the on-screen **Temperature** and **DC Motor** plots
+(logged data is kept). Plots are redrawn on the GUI thread ~10×/s and at most
+1500 points per line are drawn (long runs are thinned for display only — every
+sample is still recorded), so drawing never takes CPU from the control loops.
 
-**Adjustable sampling rate + live read-out** — the **Graphs & Sampling** panel
-has a **Sampling rate (Hz)** box (1–100 Hz, default 50). The temperature and
-spooler control loops read this **live**, so you can change the rate without
-restarting. Below it, a line shows the rate **actually being written to the CSV
-buffers**:
+**Sampling rate (Hz)** (1–100, default 50) is the rate of the temperature and
+spooler **control loops and of the recorded data — one rate for both** (v7).
+An experiment sent from the laptop sets its own rate. The read-out below it
+shows the rate actually achieved:
 
 ```
-Target 50 Hz  |  recorded to CSV: temp 50 Hz, spooler 0 Hz  |  loop 480 Hz
+Target 50 Hz  |  recorded to CSV: temp 47 Hz, spooler 47 Hz  |  loop 480 Hz
 ```
 
-It turns **green** when the recorded rate keeps up with the target, **orange**
-if it's falling short (lower the target then), and grey when nothing is
-recording. This directly answers "am I really getting my samples into the CSV?"
+Green = keeping up, orange = falling short (lower the rate), grey = idle. With
+the 2 ms loop poll, a 50 Hz setting achieves ~46–48 Hz; every row carries its
+exact timestamp.
 
-> **Important fix in v5:** earlier versions redrew the plots *inside the
-> hardware-control thread*. On the Pi each matplotlib redraw costs tens of ms,
-> so the redraws starved the sampling loop and only ~4 rows/s reached the CSV —
-> far below the requested rate. v5 makes the hardware thread **append-only**
-> (microseconds) and moves all redrawing to a **QTimer on the GUI thread**
-> (`Plot.redraw`, ~10 FPS). Sampling now runs at the full selected rate and
-> every sample lands in the CSV.
+### Clean measurements at a high rate (v7)
 
-| | v4 and earlier | v5 |
-|---|---|---|
-| Temperature loop | 0.1 s — 10 Hz | **0.02 s — 50 Hz** (live-adjustable) |
-| Spooler loop | 0.1 s — 10 Hz | **0.02 s — 50 Hz** (live-adjustable) |
-| Hardware loop poll (`main.LOOP_SLEEP`) | 0.05 s — 20 Hz | **0.002 s — ~500 Hz** |
-| Plot redraw | in the hardware thread | **GUI thread, ~10 FPS** |
+Running the loops faster used to make the signals noisier, which is why v6
+dropped control back to 10 Hz. v7 keeps the high rate but measures over **fixed
+time windows**, independent of the rate:
 
-### How fast can we actually go?
+- **Spooler speed** = encoder counts over the last **0.1 s**
+  (`Spooler.RPM_WINDOW`) instead of over one sample period. At 50 Hz a single
+  period holds 5× fewer counts, so the RPM (and the PID built on it) was 5×
+  more quantised; the window keeps it as clean as the original 10 Hz reading.
+- **Temperature** = mean of the thermistor readings of the last **1 s**
+  (`Thermistor.AVERAGE_WINDOW`) instead of the last 10 readings (which is only
+  0.2 s at 50 Hz).
 
-The sensors are **not** the bottleneck:
-- **Thermistor (MCP3008 ADC over SPI):** a conversion is well under 1 ms; the
-  chip can do tens of kHz. Temperature also changes slowly, so oversampling +
-  the moving average just makes the trace smoother.
-- **Spooler encoder (SPI read):** also sub-millisecond.
+At 10 Hz both are **exactly** the original calculations (verified: 0.0
+difference). At 50 Hz, in simulation, speed jitter drops from 0.34 to 0.15 RPM
+and temperature jitter from 0.09 to 0.04 °C compared with v6's per-sample
+maths. The PID gains and structure are unchanged. **Verify on the real
+machine** that the spooler is stable at your chosen rate; setting 10 Hz gives
+the original behaviour.
 
-With drawing moved off the sampling loop, the remaining limits are:
-1. **RPM quantisation at low speed** — RPM is `encoder_delta / 4704 × (60/dt)`.
-   The shorter `dt` is, the fewer counts per sample, so at **low RPM** the
-   reading (and the PID derivative built from it) gets noisier.
-2. **Python loop + Linux sleep granularity** (~1 ms) and the PID derivative
-   amplifying sensor noise as `dt` shrinks.
+The Pi clock (`UserInterface.now()`) is monotonic, so a system-clock change
+(e.g. NTP after boot) can never make the control loops jump.
 
-**Recommendation:** 50 Hz is a comfortable, stable 5× increase and the default.
-You can dial it up toward **100 Hz** from the interface for denser data, but
-expect noisier RPM at low spool speeds; past ~100 Hz you gain little real
-information and add noise. **Use the live read-out to decide:** if "recorded to
-CSV" can't keep up with the target (stays orange), back the rate off. The tuning
-constants are `main.LOOP_SLEEP` and `Plot.REDRAW_INTERVAL_MS`; the per-loop rate
-is the on-screen spinbox.
+## Remote experiments
 
-## Remote experiments (v6)
-
-The laptop can send a **whole experiment** to FrED and have it run automatically,
-then send the recorded data back. Configure it on the laptop app's
-**Experiment (FrED)** tab; this Pi code runs the sequence:
+The laptop app's **Experiment (FrED)** tab configures a run; this code runs it:
 
 1. **HEATING** — heater only, for the *heating time*.
-2. **HEATING + EXTRUSION** — heater **and** the extrusion stepper, for the
-   *heating + extrusion time*. The stepper runs at its **own, independently
-   configurable rate** for this phase (set on the laptop), so the extruder can
-   be primed before anything spools. Spooler and fan stay off.
-3. **SETTLE** — spooler, stepper (now at the experiment's normal extrusion
-   speed) and fan all activated, wait the *experiment settle time*.
-4. **RECORDING** — everything runs **and** data is recorded, for the
-   *data-taking time*. Diameter (streamed from the laptop), temperature and
-   spooler RPM are all logged on **FrED's own clock**, rebased so t = 0 at the
-   start of recording.
-5. **EXTRA SPOOLING** — heater, stepper and fan stop, but the **spooler keeps
-   running** for the user-set *extra spooling time*, coiling the fiber that was
-   already extruded. The recorded CSV is already available to retrieve during
-   this phase.
-6. **COMPLETE** — every actuator stopped; the CSV is held until the laptop
-   clicks **Retrieve Data**.
+2. **HEATING + EXTRUSION** — heater and stepper (at its own priming rate), for
+   the *heating + extrusion time*. Spooler and fan stay off.
+3. **SETTLE** — spooler, stepper and fan all on, for the *settle time*.
+4. **RECORDING** — everything runs **and** one data row is logged per sample
+   tick, for the *data-taking time*. Temperature and spooler data are logged
+   on FrED's clock with t = 0 at the start of recording.
+5. **EXTRA SPOOLING** — heater, stepper and fan stop; the **spooler keeps
+   running** for the *extra spooling time*. The data is already retrievable.
+6. **COMPLETE** — everything stopped; the data waits for **Retrieve Data**.
 
-Heater and spooler each run **closed-loop** (setpoint + PID) or **open-loop**
-(raw PWM), chosen per run on the laptop. While an experiment runs, **every
-on-screen control is disabled** — start buttons, PID gain boxes, setpoint
-spinboxes, the temperature and fan sliders, the sampling rate, graph reset and
-CSV export — and shown in lighter gray colors, so nothing can interfere with
-the run.
+**START RECORDING NOW** (laptop button, v7): the operator presses it when the
+fiber drops. During heating / extrusion / settle the run jumps straight to
+**RECORDING** (all systems on, t = 0 is that instant) for the full data-taking
+time. With no run active, the laptop's run starts directly in RECORDING.
 
-**Graphs reset with the recording** — the on-screen plots are cleared when the
-experiment is received and again the instant **RECORDING** starts, so what you
-see on the graphs during recording is exactly the data that will be sent back
-in the CSV/Excel.
+**One tick for control and data (v7).** In an experiment the temperature PID,
+spooler PID, stepper, fan and the logged row all run on the same tick at the
+experiment's sample rate; the row is written right after that tick's control
+updates. `Temp new reading` / `Spooler new reading` (1 = fresh sensor reading,
+0 = repeated value) document this row by row — in practice every row is fresh.
 
-**Aborting stops everything** — the **red STOP buttons** on the Pi (the only
-controls left live) and the **Abort button on the laptop** both end the run by
-stopping **all** systems: heater, stepper, spooler and fan are actively driven
-to zero (including during the extra-spooling phase), and the manual control
-loops are cleared so nothing resumes on its own. If no experiment is running,
-the laptop's Abort still works as a remote all-stop. The current phase and
-time remaining show in the Diameter panel. Implemented in `experiment.py`
-(state machine), driven by `main.py`; the recorded data is sent back over the
-same WiFi link.
+**Diameter:** the Pi's table has no diameter columns. It sends its recording
+start/end times (Pi clock) with the data, and the laptop merges its own
+camera data onto the rows (see the laptop README, *Time synchronisation*).
 
-## How the link works
+While a run is active **every control on this screen is disabled** and shown
+in lighter gray, except the red STOP buttons. The manual control loops are
+switched off when a run starts, so none of them resumes after the run.
 
-The **Pi is the server**: `external_diameter.py` listens on TCP port **5005**
-and accepts a connection from the laptop. The laptop sends newline-delimited
-JSON, one message per measurement:
+**Graphs reset with the recording** — cleared when the experiment is received
+and again when RECORDING starts, so they show exactly the exported window.
 
-```json
-{"v": 1, "d": 0.352, "u": "mm", "t": 12.345, "found": true}
-```
+**Aborting stops everything** — a red **STOP** on the Pi or **ABORT** on the
+laptop stops heater, stepper, spooler and fan (also during extra spooling) and
+clears the manual control loops. With no run active, the laptop's Abort is a
+remote all-stop. Implemented in `experiment.py`, driven by `main.py`.
 
-| field | meaning |
+## How the laptop link works
+
+`laptop_link.py` is a TCP **server** on port **5005**; the laptop connects as
+a client. Messages are newline-delimited JSON with a `type`:
+
+| laptop → Pi | meaning |
 |---|---|
-| `v` | protocol version (1) |
-| `d` | diameter value, in the units of `u` |
-| `u` | units (`mm`, or `px` if the computer is not calibrated) |
-| `t` | sender elapsed seconds (informational) |
-| `found` | whether a fiber was detected in that frame |
+| `{"type": "experiment", "params": {...}}` | start an automated run |
+| `{"type": "start_now", "params": {...}}` | START RECORDING NOW |
+| `{"type": "abort"}` | stop every system |
+| `{"type": "get_data"}` | send the recorded table |
+| `{"type": "sync", "id": n, "t1": t}` | clock-sync ping (every 2 s) |
 
-`external_diameter.py` reads this on a background thread and exposes the latest
-value. The Pi keeps the port open and automatically goes back to *waiting for a
-laptop* if the connection drops, so the programs can be started in any order and
-the laptop can disconnect/reconnect at any time. Calibrate the camera **on the
-computer** so the streamed `d` is already in millimetres (matching the Target
-Diameter range of 0.30–0.60 mm).
+| Pi → laptop | meaning |
+|---|---|
+| `{"type": "status", "phase", "remaining", "message", "data_ready", "t0"?}` | phase changes (`t0` = recording start, Pi clock) |
+| `{"type": "data", "name", "b64", "meta"}` | recorded table (CSV, base64) + its t0 / t_end / rate |
+| `{"type": "sync_reply", "id", "t1", "t2", "t3", "boot"}` | ping answer: arrival and departure times on the Pi clock |
 
-**Jitter filter** — the raw camera measurement shakes with the fiber and has
-occasional single-frame mis-detections (jumps of up to ~0.17 mm in real runs).
-Each received measurement is therefore filtered on arrival: a **median over
-the last 5 messages** removes those short spikes, then a **3-point average**
-smooths the remaining jitter, adding only ~0.2–0.4 s of lag. Everything on the
-Pi — the diameter graph, the recorded experiment data, any control — uses the
-filtered value; the unfiltered measurement is still recorded in the experiment
-export as **`Diameter raw (mm)`** next to the filtered `Diameter (mm)`, so you
-can always see exactly what the filter did. Frames where no fiber was detected
-never enter the filter. Tuning: `MEDIAN_WINDOW` / `SMOOTH_WINDOW` in
-`external_diameter.py`.
+The Pi answers sync pings on the network thread straight away. On every
+(re)connection it sends the current phase, so the laptop stays in step after a
+dropped link. The IP address shown on screen is cached for 10 s (reading it
+spawns a process). Diameter lines from an older laptop app are ignored. The Pi
+goes back to *waiting for laptop* if the connection drops.
 
 ## WiFi hotspot setup (`setup_hotspot.sh`)
 
@@ -309,16 +265,14 @@ laptop:
 | **Password** | `fredfiber123` |
 | **Pi IP** | `192.168.4.1` (the laptop connects here, port `5005`) |
 
-These values live in `external_diameter.py` (the `HOTSPOT_*` / `STREAM_PORT`
-constants) and in `setup_hotspot.sh`; keep them in sync if you change them. The
-Pi interface reads its **actual** address at runtime and displays it, so even if
-it differs you can always read the right IP off the screen.
+These values live in `laptop_link.py` (the `HOTSPOT_*` / `LINK_PORT`
+constants) and in `setup_hotspot.sh`; keep them in sync if you change them.
+The Pi interface reads its **actual** address at runtime and displays it.
 
 > While the Pi is a hotspot its WiFi is used for the access point and is **not**
-> connected to the internet — that is intended, and is what makes the link
-> self-contained and reliable. If you need a different `nmcli`-less setup
-> (older Raspberry Pi OS), the script prints guidance for switching to
-> NetworkManager or using `hostapd` + `dnsmasq`.
+> connected to the internet — that is intended. If you need a different
+> `nmcli`-less setup (older Raspberry Pi OS), the script prints guidance for
+> switching to NetworkManager or using `hostapd` + `dnsmasq`.
 
 ---
 
@@ -330,14 +284,12 @@ The extruder ADC (MCP3008) and the spooler use **SPI**. Make sure it is enabled:
 sudo raspi-config      # Interface Options -> SPI -> Enable, then reboot
 ```
 
-(The diameter link is now over WiFi, so no serial/UART configuration is needed.)
-
 ---
 
 ## Microstepping (reducing stepper vibration)
 
 The extrusion stepper is driven by a **DRV8825**. By default it ran in
-**full-step** mode, which vibrates and disturbs the fiber. `extruder.py` now
+**full-step** mode, which vibrates and disturbs the fiber. `extruder.py`
 enables **1/16 microstepping** for much smoother motion, and scales the step
 frequency by 16 so your **RPM setting is unchanged**.
 
@@ -350,113 +302,73 @@ With `M0 = M1 = LOW`:
 | LOW  | full step (vibrates) |
 | HIGH | **1/16 step (smooth)** |
 
-The code drives M2 HIGH at start-up.
-
-### M2 pin number
-
-On this PCB the DRV8825 **M2** pin is wired to **BCM GPIO22** (physical header
-pin 15), confirmed by a continuity test:
-
-```python
-MICROSTEP_M2_PIN = 22   # in extruder.py
-```
-
-If you ever move it to a different board, re-confirm the pin (BCM 16 is the
-stepper **direction** pin, so M2 is never 16). If the value is wrong the motor
-still vibrates *and* spins at the wrong speed (because of the ×16 scaling). To
-find it: power the Pi **off**, set a multimeter to continuity, touch one probe
-to the DRV8825 **M2** pad and the other to header pins until it beeps — that
-pin's **BCM** number is the value for `MICROSTEP_M2_PIN`.
-
-To verify after setting it: run the extruder at a known RPM — it should sound
-noticeably smoother/quieter, and turn at the same speed as before (not ~16×
-slower). If it runs very slow, the pin is wrong.
-
-To temporarily go back to full step, set `MICROSTEP_FACTOR = 1` and don't drive
-M2 (or leave the wrong pin) — but microstepping is the recommended setting.
+The code drives M2 HIGH at start-up. On this PCB **M2** is wired to **BCM
+GPIO22** (physical header pin 15), confirmed by a continuity test
+(`MICROSTEP_M2_PIN = 22` in `extruder.py`). If you move to a different board,
+re-confirm the pin with a multimeter (continuity between the DRV8825 **M2** pad
+and the header). A wrong pin makes the motor vibrate *and* turn ~16× too slow.
+To go back to full step, set `MICROSTEP_FACTOR = 1`.
 
 ---
 
 ## Troubleshooting
 
 - **Installer fails to download anything** (`Release file ... is not valid
-  yet`, `certificate is not yet valid`, or every apt/pip download erroring) —
-  the Pi's clock is wrong (it has no battery-backed clock). The installer now
-  fixes this itself as its **first step**: it enables NTP and waits for sync,
-  and if NTP can't reach out it sets the date from a web server's HTTP header.
-  If it still warns that it could not synchronize, the Pi has no internet
-  route at all — remember the `FrED_Pi` hotspot has **no internet**; run
-  `bash setup_hotspot.sh down`, join a normal WiFi network (or plug in
-  ethernet), then re-run `bash setup_install.sh`.
-- **`cannot import 'QtSvg' from 'PyQt5'`** — the QtSvg module is missing. The
-  installer fixes this by installing `python3-pyqt5.qtsvg` from apt and building
-  `fred-venv` with `--system-site-packages`. If you hit it manually:
-  ```bash
-  sudo apt install python3-pyqt5 python3-pyqt5.qtsvg
-  ```
-  and make sure your venv was created with `--system-site-packages` (delete and
-  re-run `setup_install.sh` if it wasn't).
+  yet`, `certificate is not yet valid`) — the Pi's clock is wrong. The
+  installer fixes this as its **first step** (NTP, or the date from a web
+  server's HTTP header). If it still can't, the Pi has no internet route —
+  the `FrED_Pi` hotspot has **no internet**: `bash setup_hotspot.sh down`,
+  join a normal WiFi (or plug in ethernet), re-run `bash setup_install.sh`.
+- **`cannot import 'QtSvg' from 'PyQt5'`** — `sudo apt install python3-pyqt5
+  python3-pyqt5.qtsvg`, and make sure `fred-venv` was created with
+  `--system-site-packages` (delete it and re-run `setup_install.sh` if not).
 - **GUI doesn't appear / `qt.qpa.plugin` errors** — run from the Pi's desktop
-  session (or with `DISPLAY` set), not a bare SSH session without X forwarding.
-- **No diameter graph** — make sure the laptop is joined to the `FrED_Pi`
-  Wi-Fi, then in *FrED Fiber Measure with Streaming v6* enter the Pi's IP/port,
-  click **Connect** and **Start streaming**, and on the Pi press **Start
-  Diameter/Camera Loop**.
-- **"Retrieve Data" waits forever on the laptop** — the recorded CSV travels
-  as one large (>1 MB) message. Older versions sent it with a 0.5 s socket
-  deadline, which the WiFi link cannot always meet; a timed-out send left a
-  truncated message on the wire that silently corrupted everything after it.
-  Fixed: sends now get their own 30 s deadline (`SEND_TIMEOUT` in
-  `external_diameter.py`), and if a send still fails the Pi closes the
-  connection so the laptop notices immediately and reconnects clean instead
-  of waiting on a poisoned stream. Make sure the Pi runs the current code
-  (`git pull` in this folder, then restart — no reinstall needed).
+  session (or with `DISPLAY` set), not a bare SSH session.
+- **Where is the diameter graph?** — on the laptop (v7). The Pi shows only
+  temperature and spooler speed.
+- **"Retrieve Data" waits forever on the laptop** — the recorded CSV travels as
+  one large message; sends get their own 30 s deadline (`SEND_TIMEOUT` in
+  `laptop_link.py`) and a failed send closes the connection so the laptop
+  reconnects clean. Make sure the Pi runs the current code (`git pull`, then
+  restart).
 - **Laptop can't connect / "connection refused"** — confirm the hotspot is up
   (`bash setup_hotspot.sh status`), that the laptop joined `FrED_Pi`, and that
-  the Pi program is running (it's what opens port 5005). The Pi panel shows
-  *waiting for laptop* until the laptop connects.
-- **Re-running the installer** is safe: it reuses an existing `fred-venv` and
-  only installs what's missing.
+  the Pi program is running (it opens port 5005).
+- **Spooler oscillates at a high sampling rate** — lower the experiment's
+  *FrED sample rate* (10 Hz = original behaviour) and report it; see *Clean
+  measurements at a high rate* above.
+- **Re-running the installer** is safe: it reuses `fred-venv` and only installs
+  what's missing.
 
 ---
 
 ## Run summary
 
 ```bash
-# install once
-bash setup_install.sh
-
-# start the WiFi hotspot (once, or after a reboot)
-bash setup_hotspot.sh
-
-# every time you want to run it:
-source fred-venv/bin/activate
-python main.py
-# ...or the shortcut that does both:
-bash start_fred.sh
+bash setup_install.sh     # once, fresh Pi only
+bash setup_hotspot.sh     # once per boot
+bash start_fred.sh        # every time (or: source fred-venv/bin/activate; python main.py)
 ```
 
-Then, on your computer, join the `FrED_Pi` Wi-Fi, run *FrED Fiber Measure with
-Streaming v6*, enter the Pi's IP/port (shown on the Pi screen, default
-`192.168.4.1` : `5005`), click **Connect** and **Start streaming**. On the Pi,
-press **Start Diameter/Camera Loop** to begin graphing.
+Then, on the laptop, join the `FrED_Pi` Wi-Fi, run *FrED Fiber Measure*,
+enter the Pi's IP/port (default `192.168.4.1` : `5005`) and click **Connect**.
 
 ## Modules
 
 - `main.py` — **entry point**; starts the GUI and the hardware-control thread.
-- `user_interface.py` — PyQt5 interface (grouped controls + 3 enlarged graphs);
-  shows the live WiFi connection details for the laptop.
-- `external_diameter.py` — TCP **server** that receives the streamed diameter
-  over WiFi and feeds it into the diameter plot / `Database` (replaces
-  `fiber_camera.py`).
+- `user_interface.py` — PyQt5 interface (grouped controls + 2 graphs); shows
+  the WiFi connection details; owns the Pi clock (`now()`).
+- `experiment.py` — remote-experiment state machine (phases, START NOW,
+  one-tick control + logging, recorded table).
+- `laptop_link.py` — TCP **server** for the laptop's commands and clock-sync
+  pings (replaces `external_diameter.py`).
 - `setup_hotspot.sh` — turns the Pi into a self-contained WiFi access point.
-- `database.py` — data storage and CSV generation.
+- `database.py` — data storage and the manual CSV export.
 - `extruder.py` — heater + stepper control (thermistor, PID).
 - `spooler.py` — DC spooling motor control (encoder, PID, calibration).
 - `fan.py` — cooling-fan control.
 - `fake_gpio.py` — RPi.GPIO stand-in for off-Pi testing.
-- `calibration.yaml` — motor calibration (diameter calibration now lives on the
-  computer).
+- `calibration.yaml` — motor calibration.
 - `setup_install.sh` — installer (apt packages + `fred-venv` + `requirements.txt`).
 - `start_fred.sh` — activates `fred-venv` and runs `main.py`.
 - `requirements.txt` — pip packages installed into the venv.

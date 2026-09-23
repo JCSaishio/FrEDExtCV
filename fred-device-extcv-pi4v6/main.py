@@ -13,8 +13,9 @@ from extruder import Extruder
 # (UserInterface.Plot.redraw), so drawing no longer blocks sampling. With that
 # bottleneck gone, the loop polls at ~500 Hz so it can comfortably service the
 # user-selectable sampling rate (UserInterface.get_sample_period) up to 100 Hz.
-# Each non-sampling poll is cheap (just a timestamp check), and the camera/CV is
-# gone, so this is light on the Pi 4.
+# Each non-sampling poll is cheap (just a timestamp check), and neither the
+# camera/CV nor the diameter stream runs on the Pi (v7: the diameter lives
+# entirely on the laptop), so this is light on the Pi 4.
 LOOP_SLEEP = 0.002
 
 def hardware_control(gui: UserInterface) -> None:
@@ -33,10 +34,12 @@ def hardware_control(gui: UserInterface) -> None:
         gui.show_message("Error while starting the device",
                          "Please restart the program.")
 
-    init_time = time.time()
     while True:
         try:
-            current_time = time.time() - init_time
+            # The Pi's experiment clock (monotonic: an NTP/clock change can
+            # never make it jump). The laptop's clock sync reads this same
+            # clock, so recorded rows can be lined up with the camera data.
+            current_time = gui.now()
             Database.time_readings.append(current_time)
 
             # --- Manual STOP requests from the interface (one-shot) --------- #
@@ -79,8 +82,6 @@ def hardware_control(gui: UserInterface) -> None:
             if gui.monitor_mode_enabled:
                 extruder.monitor_temperature(current_time)
                 spooler.monitor_rpm(current_time)
-                if gui.diameter_loop_enabled:
-                    gui.diameter_source.update(current_time)
                 fan.control_loop()
                 time.sleep(LOOP_SLEEP)
                 continue
@@ -96,10 +97,6 @@ def hardware_control(gui: UserInterface) -> None:
             if gui.heater_open_loop_enabled and not gui.device_started:
                 extruder.temperature_open_loop_control(current_time)
                 extruder.stepper_control_loop()
-
-            # Diameter feedback streamed from the external CV computer
-            if gui.diameter_loop_enabled:
-                gui.diameter_source.update(current_time)
 
             if gui.device_started:
                 extruder.temperature_control_loop(current_time)

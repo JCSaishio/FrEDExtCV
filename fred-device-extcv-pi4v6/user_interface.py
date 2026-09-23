@@ -1,10 +1,10 @@
-"""Graphical User Interface for the FrED device (external-CV variant).
+"""Graphical User Interface for the FrED device (external-CV variant, v7).
 
-The fiber diameter is measured on an external computer and streamed to the
-Raspberry Pi over WiFi (see ``external_diameter.py``). This interface therefore
-has no camera feed and no image-processing controls; the space they used to
-occupy is given to larger Diameter, DC Motor and Temperature graphs and to the
-device controls and export options.
+The fiber diameter is measured, graphed and recorded entirely on an external
+computer (the laptop CV app). Since v7 it is not streamed to the Pi at all: the
+Pi's CPU goes to the heater and spooler control loops and to their two graphs
+(DC Motor and Temperature). The laptop connects over WiFi only to send
+experiments and commands (see ``laptop_link.py``).
 """
 import time
 
@@ -17,27 +17,28 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from database import Database
-from external_diameter import ExternalDiameter
+from laptop_link import LaptopLink
 from experiment import Experiment
-from signal_filter import (EMAFilter, ALPHA_TEMPERATURE, ALPHA_SPOOLER_RPM,
-                           rescale_alpha)
+from signal_filter import EMAFilter, ALPHA_TEMPERATURE, ALPHA_SPOOLER_RPM
 
-# The control loops feed the plots at ~10 Hz (Extruder/Spooler SAMPLE_TIME = 0.1 s).
-# EMA coefficients for the two filtered plots (raise = less smoothing/less lag,
-# lower = smoother/more lag). Easy to tweak here.
-PLOT_RATE_HZ = 10.0
-# Temperature is slow: rescale the 50 Hz preset to 10 Hz to keep the SAME physical
-# smoothing (time constant ~0.65 s) -> alpha ~0.134.
-PLOT_ALPHA_TEMPERATURE = rescale_alpha(ALPHA_TEMPERATURE, 50.0, PLOT_RATE_HZ)
-# Spooler RPM: use the preset alpha directly. An EMA's noise-std reduction depends
-# only on alpha (not the rate), so this gives the same visible smoothing on the
-# graph as the 50 Hz path (~0.3 s lag at 10 Hz), instead of the near-passthrough
-# a time-constant rescale would give.
+# Since v7 the control loops feed the plots at the Sampling rate (default
+# 50 Hz), so the 50 Hz presets from signal_filter.py apply directly: temperature
+# alpha 0.03 (time constant ~0.65 s), spooler RPM alpha 0.25. EMA coefficients
+# for the two filtered plots (raise = less smoothing/less lag, lower = smoother/
+# more lag). They only smooth what is DRAWN; control and data are unfiltered.
+PLOT_ALPHA_TEMPERATURE = ALPHA_TEMPERATURE
 PLOT_ALPHA_SPOOLER_RPM = ALPHA_SPOOLER_RPM
 
 
 class UserInterface():
     """Graphical User Interface Class"""
+
+    # Upper limits of the spooling-motor PID gains (Kp, Ki, Kd). They bound the
+    # spin boxes here and any experiment sent from the laptop.
+    MOTOR_GAIN_LIMITS = (1.0, 15.0, 0.05)
+
+    # Sampling rate limits (Hz) for the control loops and logged data.
+    SAMPLE_RATE_LIMITS = (1.0, 100.0)
 
     BUTTON_STYLE = (
         "QPushButton { background-color: #3a3a3a; color: white; font-size: 14px;"
@@ -78,13 +79,15 @@ class UserInterface():
         self.app = QApplication([])
         self.window = QWidget()
 
+        # Origin of the Pi's experiment clock (see now()).
+        self.clock_origin = time.monotonic()
+
         # --- Control / device state flags --------------------------------- #
         self.device_started = False
         self.start_motor_calibration = False
         self.heater_open_loop_enabled = False
         self.dc_motor_open_loop_enabled = False
         self.dc_motor_close_loop_enabled = False
-        self.diameter_loop_enabled = False
         self.break_level1_enabled = False
         self.break_level2_enabled = False
         self.break_level3_enabled = False
@@ -98,11 +101,8 @@ class UserInterface():
         self.pending_graph_reset = False     # set by an experiment start
         self._controls_locked = False        # manual buttons disabled state
 
-        # --- Plots (the graphed signals are EMA-filtered for a clean trace) --- #
-        # Diameter arrives already filtered from external_diameter.py (median+mean
-        # on the Pi), so its plot needs no extra filter. Temperature and spooler
-        # RPM are filtered here so the graphs show the filtered input.
-        self.diameter_plot = self.Plot("Diameter", "Diameter (mm)")
+        # --- Plots (EMA-filtered for a clean trace; the diameter is graphed
+        #     on the laptop since v7) ---------------------------------------- #
         self.motor_plot = self.Plot("DC Spooling Motor", "Speed (RPM)",
                                     alpha=PLOT_ALPHA_SPOOLER_RPM)
         self.temperature_plot = self.Plot("Temperature", "Temperature (C)",
@@ -118,30 +118,28 @@ class UserInterface():
         # --- Remote experiment controller (driven from the laptop) -------- #
         self.experiment = Experiment(self)
 
-        # --- External diameter source (WiFi stream, replaces the camera) -- #
-        self.diameter_source = ExternalDiameter(self.target_diameter, self)
+        # --- WiFi command link to the laptop (experiments, sync) ---------- #
+        self.laptop_link = LaptopLink(self)
 
         # --- Assemble window ---------------------------------------------- #
         self._build_layout()
         self.window.setStyleSheet(self.LOCKED_INPUT_STYLE)
-        self.window.setWindowTitle("MIT FrED - External CV (WiFi, v6)")
+        self.window.setWindowTitle("MIT FrED - External CV (WiFi, v7)")
         self.window.setGeometry(80, 60, 1600, 1000)
         self.window.setMinimumSize(1200, 800)
-        self.app.aboutToQuit.connect(self.diameter_source.close)
+        self.app.aboutToQuit.connect(self.laptop_link.close)
+
+    def now(self) -> float:
+        """The Pi's experiment clock (s): monotonic, so it never jumps when the
+        system clock is set. The hardware loop timestamps every sample with it
+        and the laptop's clock sync reads it (laptop_link.py)."""
+        return time.monotonic() - self.clock_origin
 
     # ==================================================================== #
     # Widget creation
     # ==================================================================== #
     def _create_controls(self) -> None:
         """Create every control widget and store it as an attribute."""
-        # Diameter target
-        self.target_diameter = QDoubleSpinBox()
-        self.target_diameter.setMinimum(0.3)
-        self.target_diameter.setMaximum(0.6)
-        self.target_diameter.setValue(0.35)
-        self.target_diameter.setSingleStep(0.01)
-        self.target_diameter.setDecimals(2)
-
         # Extrusion (stepper) motor speed
         self.extrusion_motor_speed = QDoubleSpinBox()
         self.extrusion_motor_speed.setMinimum(0.0)
@@ -178,9 +176,10 @@ class UserInterface():
         # DC (spooling) motor controls
         self.dc_motor_pwm = self._make_spinbox(0, 100, 0, 1, 0)
         self.motor_setpoint = self._make_spinbox(0, 60, 30, 1, 1)
-        self.motor_kp = self._make_spinbox(0, 10, 0.50, 0.01, 3)
-        self.motor_ki = self._make_spinbox(0, 10, 0.50, 0.01, 3)
-        self.motor_kd = self._make_spinbox(0, 10, 0.05, 0.01, 3)
+        kp_max, ki_max, kd_max = self.MOTOR_GAIN_LIMITS
+        self.motor_kp = self._make_spinbox(0, kp_max, 0.50, 0.01, 3)
+        self.motor_ki = self._make_spinbox(0, ki_max, 0.50, 0.01, 3)
+        self.motor_kd = self._make_spinbox(0, kd_max, 0.05, 0.001, 4)
 
         # Data export
         self.csv_filename = QLineEdit()
@@ -188,7 +187,8 @@ class UserInterface():
 
         # Sampling rate (Hz) the control loops target, and a live read-out of
         # the rate actually being recorded to the CSV buffers.
-        self.sample_rate_hz = self._make_spinbox(1, 100, 50, 1, 0)
+        self.sample_rate_hz = self._make_spinbox(*self.SAMPLE_RATE_LIMITS,
+                                                 50, 1, 0)
         self.sampling_status_label = QLabel("Sampling: waiting for data...")
         self.sampling_status_label.setWordWrap(True)
 
@@ -198,8 +198,8 @@ class UserInterface():
         self.experiment_status_label.setStyleSheet(
             "font-weight: bold; color: #3a6ea5;")
 
-        # Diameter source status
-        self.connection_status_label = QLabel("Diameter source: starting...")
+        # Laptop link status
+        self.connection_status_label = QLabel("Laptop link: starting...")
         self.connection_status_label.setWordWrap(True)
 
         # WiFi hotspot / connection details the laptop needs (filled in live)
@@ -226,17 +226,17 @@ class UserInterface():
     def _build_layout(self) -> None:
         root = QHBoxLayout()
 
-        # ---- Left: the three graphs, stacked and enlarged ---------------- #
+        # ---- Left: the two graphs, stacked and enlarged ------------------ #
         plots_panel = QVBoxLayout()
-        for plot in (self.diameter_plot, self.motor_plot, self.temperature_plot):
-            plot.setMinimumHeight(260)
+        for plot in (self.motor_plot, self.temperature_plot):
+            plot.setMinimumHeight(300)
             plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             plots_panel.addWidget(plot)
         root.addLayout(plots_panel, 3)
 
         # ---- Right: scrollable controls ---------------------------------- #
         controls = QVBoxLayout()
-        controls.addWidget(self._build_diameter_group())
+        controls.addWidget(self._build_link_group())
         controls.addWidget(self._build_graphs_group())
         controls.addWidget(self._build_monitor_group())
         controls.addWidget(self._build_temperature_group())
@@ -257,8 +257,8 @@ class UserInterface():
 
         self.window.setLayout(root)
 
-    def _build_diameter_group(self) -> QGroupBox:
-        box = QGroupBox("Diameter (External CV - WiFi)")
+    def _build_link_group(self) -> QGroupBox:
+        box = QGroupBox("Laptop Link (WiFi) - diameter is on the laptop")
         layout = QVBoxLayout()
 
         wifi_title = QLabel("Connect the laptop over WiFi:")
@@ -269,15 +269,6 @@ class UserInterface():
 
         self.connection_status_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.connection_status_label)
-
-        self.diameter_loop_btn = QPushButton("Start Diameter/Camera Loop")
-        self.diameter_loop_btn.setStyleSheet(self.BUTTON_STYLE)
-        self.diameter_loop_btn.clicked.connect(self.set_diameter_loop)
-        layout.addWidget(self.diameter_loop_btn)
-
-        form = QFormLayout()
-        form.addRow("Target Diameter (mm)", self.target_diameter)
-        layout.addLayout(form)
 
         box.setLayout(layout)
         return box
@@ -382,8 +373,8 @@ class UserInterface():
         self.reset_graphs_btn.setStyleSheet(self.BUTTON_STYLE)
         self.reset_graphs_btn.clicked.connect(self.reset_graphs)
         layout.addWidget(self.reset_graphs_btn)
-        note = QLabel("Reset clears the Diameter, Temperature and DC Motor plots "
-                      "on screen (logged CSV data is kept).")
+        note = QLabel("Reset clears the Temperature and DC Motor plots on "
+                      "screen (logged CSV data is kept).")
         note.setWordWrap(True)
         layout.addWidget(note)
 
@@ -391,9 +382,10 @@ class UserInterface():
         form.addRow("Sampling rate (Hz)", self.sample_rate_hz)
         layout.addLayout(form)
         layout.addWidget(self.sampling_status_label)
-        hint = QLabel("Target rate for the temperature & spooler loops. The line "
-                      "above shows the rate actually written to the CSV; if it "
-                      "falls short of the target, lower the rate.")
+        hint = QLabel("Rate of the temperature & spooler control loops - the "
+                      "data is recorded at this same rate (an experiment sent "
+                      "from the laptop sets its own). The line above shows the "
+                      "rate actually achieved; if it falls short, lower it.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888888;")
         layout.addWidget(hint)
@@ -476,29 +468,26 @@ class UserInterface():
         QMessageBox.information(self.app.activeWindow(),
             "Motor Control", f"Motor close loop control {state}.")
 
-    def set_diameter_loop(self) -> None:
-        """Start/stop graphing the diameter streamed from the external CV."""
-        self.diameter_loop_enabled = not self.diameter_loop_enabled
-        state = "started" if self.diameter_loop_enabled else "stopped"
-        QMessageBox.information(self.app.activeWindow(),
-            "Diameter Loop", f"Diameter loop {state}.")
-
     def reset_graphs(self) -> None:
-        """Clear the on-screen Diameter, Temperature and DC Motor plots."""
-        for plot in (self.diameter_plot, self.temperature_plot, self.motor_plot):
+        """Clear the on-screen Temperature and DC Motor plots."""
+        for plot in (self.temperature_plot, self.motor_plot):
             plot.reset()
 
     def get_sample_period(self) -> float:
-        """Sampling/control period (seconds) from the Sampling-rate spinbox.
+        """Sampling/control period (seconds): the running experiment's
+        ``sample_rate_hz`` if it sets one, else the Sampling-rate spinbox.
 
-        Read live by the temperature and spooler control loops so the user can
-        change the rate from the interface without restarting the program.
+        Read live by the temperature and spooler control loops (and the
+        experiment's data rows) so control and data share one frequency.
         """
-        try:
-            hz = float(self.sample_rate_hz.value())
-        except Exception:
-            return 0.02
-        return 1.0 / hz if hz > 0 else 0.02
+        hz = self.experiment.override("sample_rate_hz")
+        if hz is None:
+            try:
+                hz = float(self.sample_rate_hz.value())
+            except Exception:
+                return 0.02
+        low, high = self.SAMPLE_RATE_LIMITS
+        return 1.0 / min(max(hz, low), high)
 
     # ------------------------------------------------------------------ #
     # Setpoint / gain accessors. Return the running experiment's value when an
@@ -528,9 +517,12 @@ class UserInterface():
 
     def get_motor_pid(self):
         if self.experiment.override("motor_kp") is not None:
-            return (self.experiment.override("motor_kp"),
-                    self.experiment.override("motor_ki"),
-                    self.experiment.override("motor_kd"))
+            # Hold experiment gains to the same limits as the spin boxes.
+            gains = (self.experiment.override("motor_kp"),
+                     self.experiment.override("motor_ki"),
+                     self.experiment.override("motor_kd"))
+            return tuple(min(max(g or 0.0, 0.0), limit)
+                         for g, limit in zip(gains, self.MOTOR_GAIN_LIMITS))
         return (self.motor_kp.value(), self.motor_ki.value(),
                 self.motor_kd.value())
 
@@ -546,9 +538,11 @@ class UserInterface():
         v = self.experiment.override("fan_duty")
         return v if v is not None else self.fan_duty_cycle.value()
 
-    def get_target_diameter(self) -> float:
+    def get_target_diameter(self):
+        """Target diameter of the running experiment (only logged; the
+        diameter itself is measured on the laptop), or "" when none."""
         v = self.experiment.override("target_diameter")
-        return v if v is not None else self.target_diameter.value()
+        return v if v is not None else ""
 
     def set_start_device(self) -> None:
         if self._block_if_monitoring():
@@ -654,6 +648,11 @@ class UserInterface():
         # and never touches matplotlib, so a high sampling rate is not slowed by
         # the (expensive) canvas redraw and every sample reaches the CSV buffers.
         REDRAW_INTERVAL_MS = 100
+        # At most this many points are drawn per line: a long run at 50 Hz has
+        # tens of thousands, and redrawing them all every 100 ms would take
+        # CPU from the control loops. Only the drawing is thinned out - every
+        # sample is still recorded.
+        MAX_DRAWN_POINTS = 1500
 
         def __init__(self, title: str, y_label: str, alpha: float = None) -> None:
             self.figure = Figure()
@@ -701,9 +700,13 @@ class UserInterface():
             n = min(len(self.x_data), len(self.y_data), len(self.setpoint_data))
             if n == 0:
                 return
-            xs = self.x_data[:n]
-            ys = self.y_data[:n]
-            sps = self.setpoint_data[:n]
+            step = (n - 1) // self.MAX_DRAWN_POINTS + 1
+            idx = list(range(0, n, step))
+            if idx[-1] != n - 1:
+                idx.append(n - 1)          # always draw the newest sample
+            xs = [self.x_data[i] for i in idx]
+            ys = [self.y_data[i] for i in idx]
+            sps = [self.setpoint_data[i] for i in idx]
             self.progress_line.set_label(f"{self.title}: {self._latest_y:.2f}")
             self.axes.legend()
             self.progress_line.set_data(xs, ys)
@@ -734,7 +737,7 @@ class UserInterface():
     # GUI lifecycle
     # ==================================================================== #
     def _update_connection_status(self) -> None:
-        info = self.diameter_source.connection_info()
+        info = self.laptop_link.connection_info()
         ips = info["all_ips"] or [info["ip"]]
         ip_line = info["ip"]
         if len(ips) > 1:
@@ -767,16 +770,8 @@ class UserInterface():
                 self.STOP_BUTTON_STYLE if self.fan_enabled
                 else self.BUTTON_STYLE)
 
-        text = self.diameter_source.status_text()
-        if self.diameter_loop_enabled:
-            text += "  |  loop: ON"
-        self.connection_status_label.setText(text)
-        if self.diameter_source.is_streaming():
-            color = "green"
-        elif self.diameter_source.connected:
-            color = "orange"
-        else:
-            color = "red"
+        self.connection_status_label.setText(self.laptop_link.status_text())
+        color = "green" if self.laptop_link.connected else "red"
         self.connection_status_label.setStyleSheet(
             f"font-weight: bold; color: {color};")
 
@@ -786,7 +781,7 @@ class UserInterface():
         if self.pending_graph_reset:
             self.pending_graph_reset = False
             self.reset_graphs()
-        for plot in (self.diameter_plot, self.motor_plot, self.temperature_plot):
+        for plot in (self.motor_plot, self.temperature_plot):
             plot.redraw()
 
     def set_controls_locked(self, locked: bool) -> None:
@@ -800,12 +795,12 @@ class UserInterface():
         BUTTON_STYLE, LOCKED_INPUT_STYLE and SLIDER_STYLE)."""
         controls = (
             # buttons
-            self.diameter_loop_btn, self.start_device_btn,
+            self.start_device_btn,
             self.heater_open_btn, self.motor_close_btn, self.dc_open_btn,
             self.monitor_btn, self.fan_toggle_btn, self.reset_graphs_btn,
             self.download_csv_btn,
             # setpoints / gains / inputs
-            self.target_diameter, self.extrusion_motor_speed,
+            self.extrusion_motor_speed,
             self.target_temperature, self.temperature_kp, self.temperature_ki,
             self.temperature_kd, self.heater_open_loop_pwm,
             self.fan_duty_cycle, self.dc_motor_pwm, self.motor_setpoint,

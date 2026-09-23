@@ -1,6 +1,8 @@
 """File to control the extrusion process"""
 import time
 import math
+from collections import deque
+
 import RPi.GPIO as GPIO
 import busio
 import board
@@ -19,10 +21,17 @@ class Thermistor:
     VOLTAGE_SUPPLY = 3.3 # V
     RESISTOR = 100000 # Ω
     READINGS_TO_AVERAGE = 10
+    # The control temperature is the mean of the readings from the last
+    # AVERAGE_WINDOW seconds: 10 readings x the original 0.1 s period, so at
+    # 10 Hz it is exactly the original 10-reading average, and at a higher
+    # sampling rate the signal stays as smooth instead of averaging only the
+    # last 0.2 s.
+    AVERAGE_WINDOW = 1.0 # s
+    _window = deque()    # (time, temperature) readings inside AVERAGE_WINDOW
 
     @classmethod
-    def get_temperature(cls, voltage: float) -> float:
-        """Get the average temperature from the voltage using Steinhart-Hart 
+    def get_temperature(cls, voltage: float, current_time: float = None) -> float:
+        """Get the average temperature from the voltage using Steinhart-Hart
         equation"""
         if voltage < 0.0001 or voltage >= cls.VOLTAGE_SUPPLY:  # Prevenir división por cero
             return 0
@@ -30,6 +39,12 @@ class Thermistor:
         ln = math.log(resistance / cls.RESISTANCE_AT_REFERENCE)
         temperature = (1 / ((ln / cls.BETA_COEFFICIENT) + (1 / cls.REFERENCE_TEMPERATURE))) - 273.15
         Database.temperature_readings.append(temperature)
+        if current_time is not None:
+            window = cls._window
+            window.append((current_time, temperature))
+            while window[0][0] <= current_time - cls.AVERAGE_WINDOW:
+                window.popleft()
+            return sum(value for _, value in window) / len(window)
         average_temperature = 0
         if len(Database.temperature_readings) > cls.READINGS_TO_AVERAGE:
             # Get last constant readings
@@ -67,12 +82,10 @@ class Extruder:
     MAXIMUM_DIAMETER = 0.6
     STEPS_PER_REVOLUTION = 200
     DEFAULT_RPM = 0.6 # TODO: Delay is not being used, will be removed temporarily
-    # Temperature control period (s) = the ORIGINAL 0.1 s / 10 Hz. The PID gains
-    # were tuned at this rate; running the loop faster (v5/v6 tried 50 Hz) made
-    # the control unstable, so the control loops use this fixed period again.
-    # Data logging for experiments is handled separately at the user's chosen
-    # rate, so this does NOT cap how dense the recorded data is.
-    SAMPLE_TIME = 0.1
+    # The temperature loops run at the interface's Sampling rate
+    # (gui.get_sample_period()), the same rate the data is logged at. The PID
+    # sees the Thermistor.AVERAGE_WINDOW (1 s) mean, so its input is as smooth
+    # as with the original 0.1 s period whatever rate is chosen.
     MAX_OUTPUT = 100
     MIN_OUTPUT = 0
 
@@ -153,7 +166,7 @@ class Extruder:
 
     def temperature_control_loop(self, current_time: float) -> None:
         """Closed loop control of the temperature of the extruder for desired diameter"""
-        if current_time - self.previous_time <= Extruder.SAMPLE_TIME:
+        if current_time - self.previous_time <= self.gui.get_sample_period():
             return
         try:
             target_temperature = self.gui.get_target_temperature()
@@ -161,7 +174,8 @@ class Extruder:
 
             delta_time = current_time - self.previous_time
             self.previous_time = current_time
-            temperature = Thermistor.get_temperature(self.channel_0.voltage)
+            temperature = Thermistor.get_temperature(self.channel_0.voltage,
+                                                     current_time)
             
             error = target_temperature - temperature
             self.integral += error * delta_time
@@ -193,14 +207,15 @@ class Extruder:
     
     def temperature_open_loop_control(self, current_time: float) -> None:
         """Open loop PWM control of the heater"""
-        if current_time - self.previous_time <= Extruder.SAMPLE_TIME:
+        if current_time - self.previous_time <= self.gui.get_sample_period():
             return
             
         try:
             pwm_value = self.gui.get_heater_pwm()
             delta_time = current_time - self.previous_time
             self.previous_time = current_time
-            temperature = Thermistor.get_temperature(self.channel_0.voltage)
+            temperature = Thermistor.get_temperature(self.channel_0.voltage,
+                                                     current_time)
 
             # Configurar PWM para el heater
             if not hasattr(self, 'heater_pwm'):
@@ -252,12 +267,13 @@ class Extruder:
         Used by the interface's monitor mode to observe how the heater
         temperature behaves on its own, with no control output applied.
         """
-        if current_time - self.previous_time <= Extruder.SAMPLE_TIME:
+        if current_time - self.previous_time <= self.gui.get_sample_period():
             return
         try:
             delta_time = current_time - self.previous_time
             self.previous_time = current_time
-            temperature = Thermistor.get_temperature(self.channel_0.voltage)
+            temperature = Thermistor.get_temperature(self.channel_0.voltage,
+                                                     current_time)
 
             # Guarantee no heater output while monitoring.
             self.heater_pwm.ChangeDutyCycle(0)

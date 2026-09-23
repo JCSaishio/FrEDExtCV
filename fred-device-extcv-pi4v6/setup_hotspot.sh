@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-# --- These MUST match the constants in external_diameter.py ----------------- #
+# --- These MUST match the constants in laptop_link.py ---------------------- #
 SSID="FrED_Pi"
 PASSWORD="fredfiber123"
 CON_NAME="FrED_Hotspot"
