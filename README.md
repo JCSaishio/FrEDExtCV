@@ -14,8 +14,8 @@ Raspberry Pi.
 
 | Folder | Runs on | What it is | Details |
 |---|---|---|---|
-| [`fred-device-extcv-pi4v6/`](fred-device-extcv-pi4v6/) | **Raspberry Pi 4** | Machine control: PyQt5 interface with temperature + spooler graphs, the control loops, the WiFi hotspot + command server, the experiment engine. Entry point `main.py` (via `start_fred.sh`). | [Pi README](fred-device-extcv-pi4v6/README.md) |
-| [`FrEDFiberMeasurewithStreamingv6/`](FrEDFiberMeasurewithStreamingv6/) | **Windows laptop** | Fiber measurement (tkinter + OpenCV): threaded camera pipeline, live diameter graph, calibration, the Experiment tab, START RECORDING NOW / MARK STEADY STATE, the merged export. Entry point `fiber_measure.py` (via `Run FrED Fiber Measure.bat`). | [Laptop README](FrEDFiberMeasurewithStreamingv6/README.md) |
+| [`fred-device-extcv-pi4v7/`](fred-device-extcv-pi4v7/) | **Raspberry Pi 4** | Machine control: PyQt5 interface with temperature + spooler graphs, the control loops, the WiFi hotspot + command server, the experiment engine. Entry point `main.py` (via `start_fred.sh`). | [Pi README](fred-device-extcv-pi4v7/README.md) |
+| [`FrEDFiberMeasurewithStreamingv7/`](FrEDFiberMeasurewithStreamingv7/) | **Windows laptop** | Fiber measurement (tkinter + OpenCV): threaded camera pipeline, live diameter graph, calibration, the Experiment tab, START RECORDING NOW / MARK STEADY STATE, the merged export. Entry point `fiber_measure.py` (via `Run FrED Fiber Measure.bat`). | [Laptop README](FrEDFiberMeasurewithStreamingv7/README.md) |
 
 This page is the overview. Each folder's README is the complete manual.
 
@@ -62,18 +62,23 @@ Pi's CPU for its control loops.
 **Raspberry Pi**
 
 ```bash
-cd fred-device-extcv-pi4v6
+cd fred-device-extcv-pi4v7
 bash setup_install.sh    # fresh Pi only
 git pull                 # to update an existing Pi (then restart the program)
 bash setup_hotspot.sh    # once per boot: start the FrED_Pi WiFi hotspot
 bash start_fred.sh       # run FrED
 ```
 
+The folders were renamed from `...v6` to `...v7`. On a Pi with the old folder,
+`git pull` from the repository folder, then use `fred-device-extcv-pi4v7/`;
+its `start_fred.sh` keeps using the installed `fred-venv` left in the old
+folder, so no reinstall is needed (details in the Pi README, section 2).
+
 **Laptop** (once: `setup_install.bat`)
 
 1. Join the Wi-Fi **`FrED_Pi`** (password `fredfiber123`).
 2. Double-click **`Run FrED Fiber Measure.bat`** in
-   `FrEDFiberMeasurewithStreamingv6/`.
+   `FrEDFiberMeasurewithStreamingv7/`.
 3. **Calibrate** the camera (px → mm) — *Measure & Connect* tab.
 4. *Measure & Connect* → IP `192.168.4.1`, port `5005` → **Connect**.
 
@@ -203,7 +208,7 @@ compatible with the v7 laptop app**. See the Pi README, section 10.
 ```
 FrEDExtCV/
 ├── README.md                          # this overview
-├── fred-device-extcv-pi4v6/           # Raspberry Pi — machine control (Pi README)
+├── fred-device-extcv-pi4v7/           # Raspberry Pi — machine control (Pi README)
 │   ├── main.py                        #   entry point (hardware thread + GUI)
 │   ├── user_interface.py              #   PyQt5 GUI: temperature + spooler graphs, Pi clock
 │   ├── experiment.py                  #   experiment state machine, one-tick control + logging
@@ -213,7 +218,7 @@ FrEDExtCV/
 │   ├── calibration.yaml
 │   └── fred_terminal.py, motor_control.py, heater_control.py,
 │       FrED_functions.py, signal_filter.py   # teammate's separate tools (not used by main.py)
-└── FrEDFiberMeasurewithStreamingv6/   # Windows laptop — CV, graph, experiments (Laptop README)
+└── FrEDFiberMeasurewithStreamingv7/   # Windows laptop — CV, graph, experiments (Laptop README)
     ├── fiber_measure.py               #   the application
     ├── Run FrED Fiber Measure.bat     #   double-click launcher
     ├── setup_install.py / setup_install.bat / requirements.txt

@@ -4,7 +4,7 @@ Raspberry Pi code for the Fiber Extrusion Device. The Pi runs the machine —
 **heater, extrusion stepper, DC spooling motor and fan** — and executes
 automated experiments sent from the laptop. The fiber **diameter is measured,
 graphed and recorded on the laptop** (see
-[`../FrEDFiberMeasurewithStreamingv6/`](../FrEDFiberMeasurewithStreamingv6/)).
+[`../FrEDFiberMeasurewithStreamingv7/`](../FrEDFiberMeasurewithStreamingv7/)).
 
 This folder is a stand-alone replacement for the original `fred-device` code.
 It installs into a Python virtual environment (`fred-venv`); the program is
@@ -57,7 +57,7 @@ experiment, press START RECORDING NOW / ABORT, and retrieve the data.
 The repository is cloned on the Pi.
 
 ```bash
-cd fred-device-extcv-pi4v6
+cd fred-device-extcv-pi4v7
 
 bash setup_install.sh     # ONLY on a fresh Pi (apt packages + fred-venv + pip)
 bash setup_hotspot.sh     # once per boot: start the FrED_Pi WiFi hotspot
@@ -66,6 +66,31 @@ bash start_fred.sh        # every time: activates fred-venv and runs main.py
 
 **Update to the latest code:** `git pull` in the repository folder, then
 restart the program. No reinstall is needed.
+
+**First update after the v7 folder rename.** This folder was called
+`fred-device-extcv-pi4v6` before v7. On a Pi that still has the old folder:
+
+```bash
+cd ~/FrEDExtCV                  # the repository folder (wherever it was cloned)
+git pull                        # the code moves to fred-device-extcv-pi4v7/
+cd fred-device-extcv-pi4v7
+bash start_fred.sh
+```
+
+- `git pull` moves every file of the code, but the git-ignored `fred-venv`
+  (the installed Python environment) stays in the old
+  `fred-device-extcv-pi4v6/` folder — a venv cannot be moved, its paths are
+  fixed when it is created. `start_fred.sh` finds it there automatically
+  (it prints *Using the existing fred-venv from the old v6 folder*), so **no
+  reinstall is needed**. Do **not** delete the old folder while it holds
+  `fred-venv`. (Running `setup_install.sh` in the new folder would create a
+  fresh `fred-venv` there, after which the old folder can be deleted — this
+  needs internet, so not over the hotspot.)
+- Anything else you saved in the old folder (e.g. CSVs from *Download CSV
+  File*) also stays there.
+- If `git pull` refuses because of local changes (e.g. `calibration.yaml`
+  after a motor calibration), copy that file somewhere, run `git checkout --
+  <file>`, pull, then copy it into the new folder.
 
 Manual run with the venv:
 

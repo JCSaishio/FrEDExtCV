@@ -9,12 +9,12 @@ rem =====================================================================
 
 set "APP_DIR=%~dp0"
 if not exist "%APP_DIR%fiber_measure.py" (
-    set "APP_DIR=C:\Users\saish\Desktop\FrED\FrEDExtCV\FrEDFiberMeasurewithStreamingv6\"
+    set "APP_DIR=C:\Users\saish\Desktop\FrED\FrEDExtCV\FrEDFiberMeasurewithStreamingv7\"
 )
 if not exist "%APP_DIR%fiber_measure.py" (
     echo Could not find fiber_measure.py.
     echo Edit the APP_DIR line inside this file so it points at the
-    echo FrEDFiberMeasurewithStreamingv6 folder on this computer.
+    echo FrEDFiberMeasurewithStreamingv7 folder on this computer.
     pause
     exit /b 1
 )

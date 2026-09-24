@@ -6,7 +6,7 @@ experiments** over WiFi, and a clock-synchronised export that merges the
 laptop's diameter data with FrED's temperature / spooler data.
 
 This program runs on the **Windows laptop**. Its partner is the Raspberry Pi
-program in [`../fred-device-extcv-pi4v6/`](../fred-device-extcv-pi4v6/), which
+program in [`../fred-device-extcv-pi4v7/`](../fred-device-extcv-pi4v7/), which
 runs the heater, extruder, spooler and fan. Both sides must run v7.
 
 ---

@@ -102,7 +102,7 @@ show_status
 
 printf "Hotspot is up. On the laptop:\n"
 printf "  1) Connect to WiFi '%s' (password '%s').\n" "$SSID" "$PASSWORD"
-printf "  2) Open 'FrED Fiber Measure with Streaming v3', set IP %s, port 5005,\n" "$PI_IP"
-printf "     then Connect and Start streaming.\n"
-printf "  3) On this Pi's interface press 'Start Diameter/Camera Loop' to graph.\n\n"
+printf "  2) Open 'FrED Fiber Measure' (v7), set IP %s, port 5005, then Connect.\n" "$PI_IP"
+printf "  3) Send experiments from its 'Experiment (FrED)' tab (the diameter is\n"
+printf "     measured and graphed on the laptop).\n\n"
 printf "To stop the hotspot later:  bash setup_hotspot.sh down\n\n"
