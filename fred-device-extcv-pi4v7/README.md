@@ -23,7 +23,7 @@ run v7.
 6. [Remote experiments](#6-remote-experiments)
 7. [The laptop link (protocol)](#7-the-laptop-link-protocol)
 8. [WiFi hotspot](#8-wifi-hotspot)
-9. [Hardware notes: SPI and microstepping](#9-hardware-notes-spi-and-microstepping)
+9. [Hardware notes: SPI and the stepper](#9-hardware-notes-spi-and-the-stepper)
 10. [Other tools in this folder (not used by main.py)](#10-other-tools-in-this-folder-not-used-by-mainpy)
 11. [Required libraries](#11-required-libraries)
 12. [Modules and tuning constants](#12-modules-and-tuning-constants)
@@ -375,7 +375,7 @@ that is intended.
 
 ---
 
-## 9. Hardware notes: SPI and microstepping
+## 9. Hardware notes: SPI and the stepper
 
 **SPI** (thermistor ADC MCP3008 and spooler encoder) must be enabled once:
 
@@ -383,15 +383,23 @@ that is intended.
 sudo raspi-config      # Interface Options -> SPI -> Enable, then reboot
 ```
 
-**Microstepping.** The extrusion stepper uses a **DRV8825**. Full-step mode
-vibrates and disturbs the fiber, so `extruder.py` enables **1/16
-microstepping** and multiplies the step frequency by 16 so the RPM setting is
-unchanged. Only the driver's **M2** pin is wired to a GPIO (**BCM GPIO22**,
-header pin 15, confirmed by a continuity test); M0 and M1 float LOW through
-the driver's pull-downs, so M2 HIGH = 1/16 step. If you move to another
-board, re-confirm the pin with a multimeter — a wrong pin makes the motor
-vibrate *and* turn ~16× too slow. To go back to full step, set
-`MICROSTEP_FACTOR = 1`.
+**Stepper: normal (full-step) mode.** The extrusion stepper runs in the
+driver's normal full-step mode: one STEP pulse per motor step, so the pulse
+frequency is `RPM × 200 / 60` (`STEPS_PER_REVOLUTION = 200` in `extruder.py`).
+The program does **not** drive the driver's microstep mode pins (M0/M1/M2)
+at all, because not every FrED wires them to the same GPIO. That keeps the
+code the same for every FrED.
+
+An earlier version turned on 1/16 microstepping by driving **BCM GPIO22**
+(the DRV8825 **M2** pin on one board) HIGH. That was removed because it only
+matched that one board's wiring. A Pi pin keeps its last level until reboot,
+so **reboot a Pi once after updating** from a version with microstepping.
+Otherwise M2 can stay HIGH and the motor turns 16× too slowly.
+
+Full step is louder and vibrates more than microstepping. If a board needs
+microstepping, set it on that board's driver hardware (mode pins or
+jumpers). Then the step frequency must be multiplied by the microstep factor
+in `Extruder.set_motor_speed` so the RPM setting stays correct.
 
 ---
 
@@ -512,7 +520,7 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `user_interface.py` | PyQt5 interface, the two graphs, the Pi clock `now()`, setpoint/gain accessors |
 | `experiment.py` | experiment state machine: phases, START RECORDING NOW, one-tick control + logging, recorded table |
 | `laptop_link.py` | TCP server for the laptop's commands and clock-sync pings (replaced `external_diameter.py`) |
-| `extruder.py` | heater (thermistor, PID, 1 s mean) + stepper (1/16 microstepping) |
+| `extruder.py` | heater (thermistor, PID, 1 s mean) + stepper (normal full-step mode) |
 | `spooler.py` | spooling motor (encoder, windowed RPM, PID, calibration) |
 | `fan.py` | cooling fan |
 | `database.py` | logged data + manual CSV export |

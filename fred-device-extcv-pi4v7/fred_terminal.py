@@ -105,8 +105,6 @@ class Hardware:
     HEATER_PIN = 6
     STEP_DIR_PIN = 16
     STEP_PIN = 20
-    MICROSTEP_M2_PIN = 22
-    MICROSTEP_FACTOR = 16
     STEPS_PER_REV = 200
     SPOOLER_PWM_PIN = 5
     FAN_PIN = 13
@@ -134,11 +132,9 @@ class Hardware:
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
         for pin in (self.HEATER_PIN, self.STEP_DIR_PIN, self.STEP_PIN,
-                    self.MICROSTEP_M2_PIN, self.SPOOLER_PWM_PIN, self.FAN_PIN,
-                    self.ENC_SS_PIN):
+                    self.SPOOLER_PWM_PIN, self.FAN_PIN, self.ENC_SS_PIN):
             GPIO.setup(pin, GPIO.OUT)
         GPIO.output(self.STEP_DIR_PIN, GPIO.HIGH)          # direction
-        GPIO.output(self.MICROSTEP_M2_PIN, GPIO.HIGH)      # 1/16 microstepping
         GPIO.output(self.ENC_SS_PIN, GPIO.HIGH)
         self.heater_pwm = GPIO.PWM(self.HEATER_PIN, 1)
         self.heater_pwm.start(0)
@@ -216,7 +212,7 @@ class Hardware:
         if rpm <= 0.0:
             self.step_pwm.ChangeDutyCycle(0)
             return
-        freq = (rpm * self.STEPS_PER_REV / 60.0) * self.MICROSTEP_FACTOR
+        freq = rpm * self.STEPS_PER_REV / 60.0              # full step
         if freq > 0:
             self.step_pwm.ChangeFrequency(freq)
             self.step_pwm.ChangeDutyCycle(50)

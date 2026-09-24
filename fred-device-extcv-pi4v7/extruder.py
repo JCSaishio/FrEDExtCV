@@ -62,21 +62,6 @@ class Extruder:
     DIRECTION_PIN = 16
     STEP_PIN = 20
 
-    # --- Microstepping (DRV8825) ------------------------------------------- #
-    # The DRV8825 selects its microstep resolution from three mode pins
-    # M0, M1, M2. On this PCB only M2 is wired to a GPIO; M0 and M1 are left
-    # floating, and the DRV8825's internal pull-down resistors hold them LOW.
-    # With M0 = M1 = LOW the relevant part of the truth table is:
-    #     M2 = LOW   -> full step   (noisy: this is the vibration we are fixing)
-    #     M2 = HIGH  -> 1/16 step   (smooth)
-    # So we drive M2 HIGH for 1/16 microstepping and multiply the STEP pulse
-    # frequency by MICROSTEP_FACTOR below so the requested RPM is unchanged.
-    #
-    # Confirmed by continuity test: the DRV8825 M2 pin is wired to BCM GPIO22
-    # (physical header pin 15) on this PCB.
-    MICROSTEP_M2_PIN = 22   # BCM GPIO the DRV8825 M2 pin is wired to
-    MICROSTEP_FACTOR = 16   # 1/16 step when M2 = HIGH and M0 = M1 = LOW
-
     DEFAULT_DIAMETER = 0.35
     MINIMUM_DIAMETER = 0.3
     MAXIMUM_DIAMETER = 0.6
@@ -100,11 +85,6 @@ class Extruder:
         GPIO.setup(Extruder.STEP_PIN, GPIO.OUT)
         self.set_motor_direction(False)
 
-        # Enable 1/16 microstepping on the DRV8825 by driving M2 HIGH
-        # (M0/M1 float LOW -> 1/16 step). This greatly reduces the stepper
-        # vibration that was disturbing the fiber.
-        GPIO.setup(Extruder.MICROSTEP_M2_PIN, GPIO.OUT)
-        GPIO.output(Extruder.MICROSTEP_M2_PIN, GPIO.HIGH)
         # PWM Setup
         self.pwm = GPIO.PWM(Extruder.STEP_PIN, 1000)  
         self.pwm.start(0)  
@@ -139,14 +119,14 @@ class Extruder:
         GPIO.output(Extruder.DIRECTION_PIN, not clockwise)
 
     def set_motor_speed(self, rpm: float) -> None:
-        """Set motor speed in RPM (accounting for microstepping).
+        """Set motor speed in RPM.
 
-        With 1/16 microstepping the driver needs MICROSTEP_FACTOR step pulses
-        per full motor step, so the pulse frequency is multiplied to keep the
-        same physical RPM the user requested.
+        Normal (full-step) mode: one STEP pulse per motor step, so the pulse
+        frequency is just the steps per second for the requested RPM. The
+        driver's microstep mode pins are left alone, so this works on any FrED
+        whatever its driver wiring.
         """
-        full_steps_per_second = (rpm * Extruder.STEPS_PER_REVOLUTION) / 60
-        frequency = full_steps_per_second * Extruder.MICROSTEP_FACTOR
+        frequency = (rpm * Extruder.STEPS_PER_REVOLUTION) / 60
         if frequency <= 0:
             return
         self.pwm.ChangeFrequency(frequency)
