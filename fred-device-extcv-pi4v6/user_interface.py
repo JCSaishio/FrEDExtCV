@@ -19,15 +19,6 @@ from matplotlib.figure import Figure
 from database import Database
 from laptop_link import LaptopLink
 from experiment import Experiment
-from signal_filter import EMAFilter, ALPHA_TEMPERATURE, ALPHA_SPOOLER_RPM
-
-# Since v7 the control loops feed the plots at the Sampling rate (default
-# 50 Hz), so the 50 Hz presets from signal_filter.py apply directly: temperature
-# alpha 0.03 (time constant ~0.65 s), spooler RPM alpha 0.25. EMA coefficients
-# for the two filtered plots (raise = less smoothing/less lag, lower = smoother/
-# more lag). They only smooth what is DRAWN; control and data are unfiltered.
-PLOT_ALPHA_TEMPERATURE = ALPHA_TEMPERATURE
-PLOT_ALPHA_SPOOLER_RPM = ALPHA_SPOOLER_RPM
 
 
 class UserInterface():
@@ -101,12 +92,9 @@ class UserInterface():
         self.pending_graph_reset = False     # set by an experiment start
         self._controls_locked = False        # manual buttons disabled state
 
-        # --- Plots (EMA-filtered for a clean trace; the diameter is graphed
-        #     on the laptop since v7) ---------------------------------------- #
-        self.motor_plot = self.Plot("DC Spooling Motor", "Speed (RPM)",
-                                    alpha=PLOT_ALPHA_SPOOLER_RPM)
-        self.temperature_plot = self.Plot("Temperature", "Temperature (C)",
-                                          alpha=PLOT_ALPHA_TEMPERATURE)
+        # --- Plots (the diameter is graphed on the laptop) ----------------- #
+        self.motor_plot = self.Plot("DC Spooling Motor", "Speed (RPM)")
+        self.temperature_plot = self.Plot("Temperature", "Temperature (C)")
 
         # --- Controls (widgets created, laid out later) ------------------- #
         self._create_controls()
@@ -654,16 +642,11 @@ class UserInterface():
         # sample is still recorded.
         MAX_DRAWN_POINTS = 1500
 
-        def __init__(self, title: str, y_label: str, alpha: float = None) -> None:
+        def __init__(self, title: str, y_label: str) -> None:
             self.figure = Figure()
             self.axes = self.figure.add_subplot(111)
             super(UserInterface.Plot, self).__init__(self.figure)
             self.title = title
-            # EMA filter for the plotted signal (None -> plot the value as given,
-            # e.g. the diameter, which arrives already filtered). The filter only
-            # smooths what is DRAWN; the control loops and the CSV keep the raw
-            # value they compute.
-            self._filter = EMAFilter(alpha) if alpha else None
             self.axes.set_title(title)
             self.axes.set_xlabel("Time (s)")
             self.axes.set_ylabel(y_label)
@@ -682,8 +665,6 @@ class UserInterface():
             no matplotlib calls here (those happen in redraw() on the GUI
             thread). Keeps this microsecond-cheap so sampling stays at full rate.
             """
-            if self._filter is not None:      # smooth only the plotted signal
-                y = self._filter.update(y)
             self.x_data.append(x)
             self.y_data.append(y)
             self.setpoint_data.append(setpoint)
@@ -723,8 +704,6 @@ class UserInterface():
             self.y_data = []
             self.setpoint_data = []
             self._dirty = False
-            if self._filter is not None:      # re-seed the filter on a fresh run
-                self._filter.reset()
             self.progress_line.set_data([], [])
             self.setpoint_line.set_data([], [])
             self.progress_line.set_label(self.title)
