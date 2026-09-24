@@ -61,6 +61,12 @@ class Extruder:
     HEATER_PIN = 6
     DIRECTION_PIN = 16
     STEP_PIN = 20
+    # DRV8825 microstep mode pins, as wired on the MIT FrED boards (same pins
+    # as mit-fredfactory/fred-device main). All LOW = normal full step, so
+    # they are driven LOW at startup whatever an earlier program left them at.
+    M0_PIN = 17
+    M1_PIN = 27
+    M2_PIN = 22
 
     DEFAULT_DIAMETER = 0.35
     MINIMUM_DIAMETER = 0.3
@@ -85,9 +91,15 @@ class Extruder:
         GPIO.setup(Extruder.STEP_PIN, GPIO.OUT)
         self.set_motor_direction(False)
 
+        # Full step: all three microstep mode pins LOW
+        for pin in (Extruder.M0_PIN, Extruder.M1_PIN, Extruder.M2_PIN):
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, GPIO.LOW)
+
         # PWM Setup
-        self.pwm = GPIO.PWM(Extruder.STEP_PIN, 1000)  
-        self.pwm.start(0)  
+        self.pwm = GPIO.PWM(Extruder.STEP_PIN, 1000)
+        self.pwm.start(0)
+        self.current_rpm = 0.0  # speed the step PWM is currently set to
         
         self.heater_pwm = GPIO.PWM(Extruder.HEATER_PIN, 1)  
         self.heater_pwm.start(0)  
@@ -122,9 +134,7 @@ class Extruder:
         """Set motor speed in RPM.
 
         Normal (full-step) mode: one STEP pulse per motor step, so the pulse
-        frequency is just the steps per second for the requested RPM. The
-        driver's microstep mode pins are left alone, so this works on any FrED
-        whatever its driver wiring.
+        frequency is just the steps per second for the requested RPM.
         """
         frequency = (rpm * Extruder.STEPS_PER_REVOLUTION) / 60
         if frequency <= 0:
@@ -136,9 +146,15 @@ class Extruder:
         """Control stepper motor speed"""
         try:
             setpoint_rpm = self.gui.get_extrusion_speed()
-            self.pwm.ChangeDutyCycle(0)
-            if setpoint_rpm > 0.0:
-                self.set_motor_speed(setpoint_rpm)
+            # Reprogram the step PWM only when the speed changes (as MIT's
+            # StepperMotor.set_speed does): resetting it on every pass of the
+            # 2 ms loop could swallow step pulses.
+            if setpoint_rpm != self.current_rpm:
+                if setpoint_rpm > 0.0:
+                    self.set_motor_speed(setpoint_rpm)
+                else:
+                    self.pwm.ChangeDutyCycle(0)
+                self.current_rpm = setpoint_rpm
             Database.extruder_rpm.append(setpoint_rpm)
         except Exception as e:
             print(f"Error in stepper control loop: {e}")
@@ -237,6 +253,9 @@ class Extruder:
     def stop_stepper(self) -> None:
         """Stop the extrusion stepper (zero the step PWM)."""
         try:
+            # Forget the running speed so the next stepper_control_loop
+            # restarts the PWM even if the setpoint is unchanged.
+            self.current_rpm = 0.0
             self.pwm.ChangeDutyCycle(0)
         except Exception as e:
             print(f"Error stopping stepper: {e}")

@@ -383,23 +383,34 @@ that is intended.
 sudo raspi-config      # Interface Options -> SPI -> Enable, then reboot
 ```
 
-**Stepper: normal (full-step) mode.** The extrusion stepper runs in the
-driver's normal full-step mode: one STEP pulse per motor step, so the pulse
-frequency is `RPM × 200 / 60` (`STEPS_PER_REVOLUTION = 200` in `extruder.py`).
-The program does **not** drive the driver's microstep mode pins (M0/M1/M2)
-at all, because not every FrED wires them to the same GPIO. That keeps the
-code the same for every FrED.
+**Stepper: normal (full-step) mode.** The extrusion stepper (DRV8825
+driver) runs in the driver's normal full-step mode: one STEP pulse per motor
+step, so the pulse frequency is `RPM × 200 / 60` (`STEPS_PER_REVOLUTION = 200`
+in `extruder.py`). This matches MIT's current code
+([mit-fredfactory/fred-device](https://github.com/mit-fredfactory/fred-device)
+`main`, January 2026):
 
-An earlier version turned on 1/16 microstepping by driving **BCM GPIO22**
-(the DRV8825 **M2** pin on one board) HIGH. That was removed because it only
-matched that one board's wiring. A Pi pin keeps its last level until reboot,
-so **reboot a Pi once after updating** from a version with microstepping.
-Otherwise M2 can stay HIGH and the motor turns 16× too slowly.
+| Signal | BCM GPIO | Header pin | Set by `extruder.py` |
+|---|---|---|---|
+| STEP | 20 | 38 | step PWM, 50 % duty while running |
+| DIR | 16 | 36 | HIGH, fixed |
+| M0 / M1 / M2 | 17 / 27 / 22 | 11 / 13 / 15 | all LOW at startup = full step |
 
-Full step is louder and vibrates more than microstepping. If a board needs
-microstepping, set it on that board's driver hardware (mode pins or
-jumpers). Then the step frequency must be multiplied by the microstep factor
-in `Extruder.set_motor_speed` so the RPM setting stays correct.
+Driving M0/M1/M2 LOW at every start guarantees full step even if an earlier
+program left a mode pin HIGH. (The earlier 1/16 microstepping drove GPIO22
+HIGH, and a Pi pin keeps its level until reboot or until a program sets it.)
+The step PWM is reprogrammed only when the RPM setpoint changes, as in
+MIT's `StepperMotor.set_speed`. Resetting it on every 2 ms loop pass could
+swallow step pulses, and in full step each lost pulse is a whole 1.8° step.
+
+**Older boards:** in MIT's history, STEP moved from **BCM12** (header pin 32)
+to **BCM20** with **PCB 2.2** (June 2025). On a board older than PCB 2.2,
+change `STEP_PIN` in `extruder.py` to 12.
+
+Full step is louder and vibrates more than microstepping. To use
+microstepping, set the mode pins for the wanted resolution and multiply the
+step frequency in `Extruder.set_motor_speed` by the same factor, so the RPM
+setting stays correct.
 
 ---
 
