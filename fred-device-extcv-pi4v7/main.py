@@ -59,6 +59,18 @@ def hardware_control(gui: UserInterface) -> None:
                 spooler.stop_motor()
                 gui.dc_motor_stop_requested = False
 
+            # --- Check Steps (skipped-step check, step_check.py): the check
+            #     runs in its own thread; this restarts the stepper after it. -- #
+            if gui.step_check_request is not None:
+                revolutions, rpm = gui.step_check_request
+                gui.step_check_request = None
+                if gui.experiment.is_active() or gui.monitor_mode_enabled:
+                    print("Check Steps refused: an experiment or monitoring "
+                          "is active.")
+                else:
+                    extruder.start_step_check(revolutions, rpm)
+            extruder.service_step_check()
+
             if gui.start_motor_calibration:
                 spooler.calibrate()
                 gui.start_motor_calibration = False
@@ -69,6 +81,7 @@ def hardware_control(gui: UserInterface) -> None:
             if gui.experiment.is_active():
                 if stop_pressed:
                     gui.experiment.abort()
+                extruder.cancel_step_check()  # the run owns the stepper
                 # update() services a pending abort first (from a STOP button
                 # here or the laptop's Abort): it stops heater, stepper,
                 # spooler AND fan and clears the manual control flags.
@@ -96,11 +109,15 @@ def hardware_control(gui: UserInterface) -> None:
             # Heater Control Logic
             if gui.heater_open_loop_enabled and not gui.device_started:
                 extruder.temperature_open_loop_control(current_time)
-                extruder.stepper_control_loop()
 
             if gui.device_started:
                 extruder.temperature_control_loop(current_time)
-                extruder.stepper_control_loop()
+
+            # Extrusion stepper: its own loop, independent of the heater
+            # loops (it used to run only inside them). It runs from Start
+            # Stepper until STOP Stepper, at the Extrusion Motor Speed.
+            if gui.stepper_enabled:
+                extruder.stepper_control_loop(current_time)
 
             fan.control_loop()
             time.sleep(LOOP_SLEEP)

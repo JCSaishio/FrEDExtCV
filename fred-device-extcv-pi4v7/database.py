@@ -1,3 +1,4 @@
+import bisect
 import io
 import yaml
 import csv
@@ -5,8 +6,8 @@ import csv
 class Database():
     """Class to store the raw data and generate the CSV file"""
     time_readings = []
-    
-    # extruder_timestamps = []
+
+    extruder_timestamps = []  # Pi clock of each extruder_rpm sample
     temperature_timestamps = []  # For future temperature measurements
     temperature_delta_time = []
     temperature_readings = []
@@ -90,10 +91,11 @@ class Database():
                            "Spooler setpoint (RPM)", "Spooler RPM",
                            "Spooler Kp", "Spooler Ki", "Spooler Kd"])
             
+            ext_ts, ext_rpm = cls._extruder_samples()
             motor_samples = len([x for x in cls.spooler_rpm if x != ""])
             for i in range(motor_samples):
                 row = [f"{cls.spooler_timestamps[i]:.3f}" if i < len(cls.spooler_timestamps) else "",
-                      cls.extruder_rpm[i] if i < len(cls.extruder_rpm) else "",
+                      cls._held_at(ext_ts, ext_rpm, cls.spooler_timestamps[i]) if i < len(cls.spooler_timestamps) else "",
                       cls.spooler_setpoint[i] if i < len(cls.spooler_setpoint) else "",
                       cls.spooler_rpm[i] if i < len(cls.spooler_rpm) else "",
                       cls.spooler_kp[i] if i < len(cls.spooler_kp) else "",  
@@ -170,7 +172,7 @@ class Database():
 
         # --- Motor table ---
         mot_ts = col("spooler_timestamps")
-        ext_rpm = col("extruder_rpm")
+        ext_ts, ext_rpm = cls._extruder_samples()
         spo_set = col("spooler_setpoint")
         spo_rpm = col("spooler_rpm")
         spo_kp = col("spooler_kp")
@@ -183,7 +185,7 @@ class Database():
         for i in range(len([x for x in spo_rpm if x != ""])):
             writer.writerow([
                 f"{mot_ts[i] - t0:.3f}" if i < len(mot_ts) else "",
-                ext_rpm[i] if i < len(ext_rpm) else "",
+                cls._held_at(ext_ts, ext_rpm, mot_ts[i]) if i < len(mot_ts) else "",
                 spo_set[i] if i < len(spo_set) else "",
                 spo_rpm[i] if i < len(spo_rpm) else "",
                 spo_kp[i] if i < len(spo_kp) else "",
@@ -192,6 +194,24 @@ class Database():
             ])
 
         return buf.getvalue()
+
+    @classmethod
+    def _extruder_samples(cls):
+        """Snapshot of the stepper log: (timestamps, rpm), equal lengths."""
+        n = min(len(cls.extruder_timestamps), len(cls.extruder_rpm))
+        return cls.extruder_timestamps[:n], cls.extruder_rpm[:n]
+
+    @staticmethod
+    def _held_at(times, values, at_time):
+        """Latest value logged at or before ``at_time`` ("" if none).
+
+        The stepper logs on its own loop, so its samples do not line up one
+        to one with the motor table's spooler rows. Each row takes the stepper
+        setting in force at that row's time - held, never interpolated, the
+        same rule the laptop uses to put camera frames on FrED's rows.
+        """
+        i = bisect.bisect_right(times, at_time) - 1
+        return values[i] if i >= 0 else ""
 
     @staticmethod
     def get_calibration_data(field: str) -> float:

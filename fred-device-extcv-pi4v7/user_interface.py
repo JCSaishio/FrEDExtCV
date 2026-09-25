@@ -16,9 +16,11 @@ from PyQt5.QtCore import QTimer, Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+import stepper_config
 from database import Database
 from laptop_link import LaptopLink
 from experiment import Experiment
+from step_check import SKIP_ADVICE
 
 
 class UserInterface():
@@ -27,6 +29,10 @@ class UserInterface():
     # Upper limits of the spooling-motor PID gains (Kp, Ki, Kd). They bound the
     # spin boxes here and any experiment sent from the laptop.
     MOTOR_GAIN_LIMITS = (1.0, 15.0, 0.05)
+
+    # Check Steps turns this many whole revolutions (the shaft mark only lines
+    # up again after whole revolutions).
+    STEP_CHECK_REVOLUTIONS = 1
 
     # Sampling rate limits (Hz) for the control loops and logged data.
     SAMPLE_RATE_LIMITS = (1.0, 100.0)
@@ -86,7 +92,11 @@ class UserInterface():
         # Per-subsystem stop/monitor state (read by the hardware-control loop)
         self.fan_enabled = True              # False -> fan held at 0% duty
         self.monitor_mode_enabled = False    # read-only: graph with no output
+        self.stepper_enabled = False         # Start Stepper: its loop runs
         self.stepper_stop_requested = False  # one-shot: zero the stepper output
+        self.step_check_request = None       # (revolutions, rpm) from Check Steps
+        self.step_check_running = False      # set by the hardware thread
+        self.step_check_result = None        # StepRun handed back when done
         self.heater_stop_requested = False   # one-shot: zero the heater output
         self.dc_motor_stop_requested = False # one-shot: zero the spooler output
         self.pending_graph_reset = False     # set by an experiment start
@@ -332,6 +342,17 @@ class UserInterface():
         form.addRow("Extrusion Motor Speed (RPM)", self.extrusion_motor_speed)
         layout.addLayout(form)
 
+        buttons = QHBoxLayout()
+        self.start_stepper_btn = QPushButton("Start Stepper")
+        self.start_stepper_btn.setStyleSheet(self.BUTTON_STYLE)
+        self.start_stepper_btn.clicked.connect(self.set_start_stepper)
+        self.check_steps_btn = QPushButton("Check Steps")
+        self.check_steps_btn.setStyleSheet(self.BUTTON_STYLE)
+        self.check_steps_btn.clicked.connect(self.request_step_check)
+        buttons.addWidget(self.start_stepper_btn)
+        buttons.addWidget(self.check_steps_btn)
+        layout.addLayout(buttons)
+
         stop_stepper = QPushButton("STOP Stepper")
         stop_stepper.setStyleSheet(self.STOP_BUTTON_STYLE)
         stop_stepper.clicked.connect(self.set_stop_stepper)
@@ -556,13 +577,82 @@ class UserInterface():
             "Heater", "Heater stopped. Restart it with one of the heater "
             "buttons when you are ready.")
 
+    def set_start_stepper(self) -> None:
+        """Run the extrusion stepper at the Extrusion Motor Speed.
+
+        The stepper has its own loop, independent of the heater loops, so it
+        turns whether or not a heater loop is running."""
+        if self._block_if_monitoring():
+            return
+        self.stepper_enabled = True
+        note = ""
+        if not (self.device_started or self.heater_open_loop_enabled):
+            note = ("\n\nNote: no heater loop is running. With a cold barrel "
+                    "the screw pushes against solid plastic.")
+        QMessageBox.information(self.app.activeWindow(), "Stepper",
+            f"Extrusion stepper started at "
+            f"{self.extrusion_motor_speed.value():.2f} RPM. Change the "
+            f"Extrusion Motor Speed at any time; STOP Stepper stops it." + note)
+
     def set_stop_stepper(self) -> None:
-        """Stop the extrusion stepper (set its speed to 0 and zero the output)."""
-        self.extrusion_motor_speed.setValue(0.0)
+        """Stop the extrusion stepper (its speed setting is kept)."""
+        self.stepper_enabled = False
         self.stepper_stop_requested = True
         QMessageBox.information(self.app.activeWindow(),
-            "Stepper", "Extrusion stepper stopped (speed set to 0). Raise the "
-            "Extrusion Motor Speed to run it again.")
+            "Stepper", "Extrusion stepper stopped. Press Start Stepper to run "
+            "it again.")
+
+    def request_step_check(self) -> None:
+        """Check Steps: turn exactly STEP_CHECK_REVOLUTIONS at the Extrusion
+        Motor Speed, so a mark on the shaft shows whether any step was
+        skipped (step_check.py)."""
+        if self._block_if_monitoring():
+            return
+        if self.step_check_request is not None or self.step_check_running:
+            QMessageBox.information(self.app.activeWindow(), "Check Steps",
+                "A step check is already running (STOP Stepper aborts it).")
+            return
+        rpm = self.extrusion_motor_speed.value()
+        if rpm <= 0.0:
+            QMessageBox.warning(self.app.activeWindow(), "Check Steps",
+                "Set the Extrusion Motor Speed (RPM) to test first.")
+            return
+        revs = self.STEP_CHECK_REVOLUTIONS
+        steps = revs * stepper_config.pulses_per_revolution()
+        answer = QMessageBox.question(self.app.activeWindow(), "Check Steps",
+            f"The stepper will turn exactly {revs} revolution ({steps} steps "
+            f"at 1/{stepper_config.MICROSTEPS} microstepping) at {rpm:.2f} "
+            f"RPM, which takes about {revs * 60.0 / rpm:.0f} s.\n\n"
+            "1. Put a mark on the motor shaft or coupling and note what it "
+            "points at.\n"
+            "2. Press Yes and watch the motor.\n"
+            "3. At the end the mark must point exactly where it started.\n\n"
+            "The normal stepper pauses during the check. STOP Stepper aborts "
+            "it.", QMessageBox.Yes | QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self.step_check_request = (revs, rpm)
+
+    def _show_step_check_result(self, result) -> None:
+        """Ask how the mark ended up after a Check Steps run (GUI thread)."""
+        print(f"[Check Steps] {result.summary()} {result.timing_text()}")
+        window = self.app.activeWindow()
+        if result.aborted:
+            QMessageBox.information(window, "Check Steps", result.summary())
+            return
+        answer = QMessageBox.question(window, "Check Steps",
+            f"{result.summary()}\n{result.timing_text()}\n\n"
+            "Is the mark back exactly where it started?",
+            QMessageBox.Yes | QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            print(f"[Check Steps] no skipped steps at {result.rpm:g} RPM")
+            QMessageBox.information(window, "Check Steps",
+                f"No skipped steps at {result.rpm:g} RPM.")
+        else:
+            print(f"[Check Steps] SKIPPED steps at {result.rpm:g} RPM")
+            QMessageBox.warning(window, "Check Steps",
+                f"The motor skipped steps at {result.rpm:g} RPM.\n\n"
+                f"{SKIP_ADVICE}\n\nFor a speed sweep, close this program "
+                "and run:  bash check_stepper.sh")
 
     def set_stop_motor(self) -> None:
         """Stop the DC spooling motor (both open- and closed-loop)."""
@@ -604,7 +694,7 @@ class UserInterface():
             self.heater_open_loop_enabled = False
             self.dc_motor_open_loop_enabled = False
             self.dc_motor_close_loop_enabled = False
-            self.extrusion_motor_speed.setValue(0.0)
+            self.stepper_enabled = False
             self.heater_stop_requested = True
             self.stepper_stop_requested = True
             self.dc_motor_stop_requested = True
@@ -754,6 +844,13 @@ class UserInterface():
         self.connection_status_label.setStyleSheet(
             f"font-weight: bold; color: {color};")
 
+        # A finished Check Steps run, handed back by the hardware thread
+        # (cleared first: the dialog below runs its own event loop).
+        result = self.step_check_result
+        if result is not None:
+            self.step_check_result = None
+            self._show_step_check_result(result)
+
     def _redraw_plots(self) -> None:
         """Repaint all plots on the GUI thread (driven by a QTimer)."""
         # An experiment start asks (from another thread) for a clean graph.
@@ -776,6 +873,7 @@ class UserInterface():
             # buttons
             self.start_device_btn,
             self.heater_open_btn, self.motor_close_btn, self.dc_open_btn,
+            self.start_stepper_btn, self.check_steps_btn,
             self.monitor_btn, self.fan_toggle_btn, self.reset_graphs_btn,
             self.download_csv_btn,
             # setpoints / gains / inputs

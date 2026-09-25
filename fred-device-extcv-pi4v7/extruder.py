@@ -10,7 +10,9 @@ import digitalio
 import adafruit_mcp3xxx.mcp3008 as MCP
 from adafruit_mcp3xxx.analog_in import AnalogIn
 
+import stepper_config
 from database import Database
+from step_check import StepCheck
 from user_interface import UserInterface
 
 class Thermistor:
@@ -59,19 +61,15 @@ class Thermistor:
 class Extruder:
     """Controller of the extrusion process: the heater and stepper motor"""
     HEATER_PIN = 6
-    DIRECTION_PIN = 16
-    STEP_PIN = 20
-    # DRV8825 microstep mode pins, as wired on the MIT FrED boards (same pins
-    # as mit-fredfactory/fred-device main). All LOW = normal full step, so
-    # they are driven LOW at startup whatever an earlier program left them at.
-    M0_PIN = 17
-    M1_PIN = 27
-    M2_PIN = 22
+    # The stepper pins and the microstep resolution live in stepper_config.py
+    # (shared with the skipped-step checker). Change MICROSTEPS there.
+    DIRECTION_PIN = stepper_config.DIRECTION_PIN
+    STEP_PIN = stepper_config.STEP_PIN
 
     DEFAULT_DIAMETER = 0.35
     MINIMUM_DIAMETER = 0.3
     MAXIMUM_DIAMETER = 0.6
-    STEPS_PER_REVOLUTION = 200
+    STEPS_PER_REVOLUTION = stepper_config.STEPS_PER_REVOLUTION
     DEFAULT_RPM = 0.6 # TODO: Delay is not being used, will be removed temporarily
     # The temperature loops run at the interface's Sampling rate
     # (gui.get_sample_period()), the same rate the data is logged at. The PID
@@ -91,16 +89,16 @@ class Extruder:
         GPIO.setup(Extruder.STEP_PIN, GPIO.OUT)
         self.set_motor_direction(False)
 
-        # Full step: all three microstep mode pins LOW
-        for pin in (Extruder.M0_PIN, Extruder.M1_PIN, Extruder.M2_PIN):
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, GPIO.LOW)
+        # Microstep resolution (stepper_config.MICROSTEPS, 1/16): all three
+        # mode pins are driven, whatever an earlier program left them at.
+        stepper_config.set_mode_pins(GPIO)
 
         # PWM Setup
-        self.pwm = GPIO.PWM(Extruder.STEP_PIN, 1000)
-        self.pwm.start(0)
+        self._start_step_pwm()
         self.current_rpm = 0.0  # speed the step PWM is currently set to
-        
+        self.previous_stepper_time = 0.0  # last stepper loop tick
+        self.step_check = None  # running Check Steps (step_check.StepCheck)
+
         self.heater_pwm = GPIO.PWM(Extruder.HEATER_PIN, 1)  
         self.heater_pwm.start(0)  
     
@@ -131,31 +129,58 @@ class Extruder:
         GPIO.output(Extruder.DIRECTION_PIN, not clockwise)
 
     def set_motor_speed(self, rpm: float) -> None:
-        """Set motor speed in RPM.
+        """Set motor speed in RPM (accounting for microstepping).
 
-        Normal (full-step) mode: one STEP pulse per motor step, so the pulse
-        frequency is just the steps per second for the requested RPM.
+        The driver needs MICROSTEPS step pulses per full motor step, so the
+        pulse frequency is multiplied to keep the physical RPM requested.
         """
-        frequency = (rpm * Extruder.STEPS_PER_REVOLUTION) / 60
+        frequency = stepper_config.step_frequency(rpm)
         if frequency <= 0:
             return
         self.pwm.ChangeFrequency(frequency)
+        self.pwm_frequency = frequency
         self.pwm.ChangeDutyCycle(50)
 
-    def stepper_control_loop(self) -> None:
-        """Control stepper motor speed"""
+    def _start_step_pwm(self) -> None:
+        """Create the step PWM, idle (0 % duty)."""
+        self.pwm = GPIO.PWM(Extruder.STEP_PIN, 1000)
+        self.pwm.start(0)
+        self.pwm_frequency = 1000.0
+
+    @staticmethod
+    def _log_rpm(timestamp: float, rpm: float) -> None:
+        """Log a stepper sample on the Pi clock (kept in time order)."""
+        if (Database.extruder_timestamps
+                and timestamp < Database.extruder_timestamps[-1]):
+            timestamp = Database.extruder_timestamps[-1]
+        Database.extruder_timestamps.append(timestamp)
+        Database.extruder_rpm.append(rpm)
+
+    def stepper_control_loop(self, current_time: float) -> None:
+        """Run the stepper at the Extrusion Motor Speed setpoint.
+
+        Its own loop, independent of the heater: it runs at the interface's
+        Sampling rate on its own timing, like the temperature and spooler
+        loops, whether or not a heater loop is on. In an experiment it is
+        driven by the run's tick (same timestamp as the recorded row).
+        """
+        if current_time - self.previous_stepper_time <= self.gui.get_sample_period():
+            return
+        if self.step_check is not None:
+            return  # Check Steps owns the STEP pin until it finishes
+        self.previous_stepper_time = current_time
         try:
             setpoint_rpm = self.gui.get_extrusion_speed()
             # Reprogram the step PWM only when the speed changes (as MIT's
-            # StepperMotor.set_speed does): resetting it on every pass of the
-            # 2 ms loop could swallow step pulses.
+            # StepperMotor.set_speed does): resetting it on every pass could
+            # swallow step pulses.
             if setpoint_rpm != self.current_rpm:
                 if setpoint_rpm > 0.0:
                     self.set_motor_speed(setpoint_rpm)
                 else:
                     self.pwm.ChangeDutyCycle(0)
                 self.current_rpm = setpoint_rpm
-            Database.extruder_rpm.append(setpoint_rpm)
+            self._log_rpm(current_time, setpoint_rpm)
         except Exception as e:
             print(f"Error in stepper control loop: {e}")
             self.gui.show_message("Error", "Stepper control loop error")
@@ -251,14 +276,63 @@ class Extruder:
             print(f"Error stopping heater: {e}")
 
     def stop_stepper(self) -> None:
-        """Stop the extrusion stepper (zero the step PWM)."""
+        """Stop the extrusion stepper (zero the step PWM, abort Check Steps)."""
         try:
             # Forget the running speed so the next stepper_control_loop
             # restarts the PWM even if the setpoint is unchanged.
             self.current_rpm = 0.0
-            self.pwm.ChangeDutyCycle(0)
+            if self.step_check is not None:
+                self.step_check.abort()
+            else:
+                self.pwm.ChangeDutyCycle(0)
+            self._log_rpm(self.gui.now(), 0.0)
         except Exception as e:
             print(f"Error stopping stepper: {e}")
+
+    # ---------------------------------------------------------------- #
+    # Check Steps: skipped-step check (see step_check.py)
+    # ---------------------------------------------------------------- #
+    def start_step_check(self, revolutions: float, rpm: float) -> None:
+        """Turn exactly ``revolutions`` at ``rpm`` in a background thread.
+
+        The software PWM cannot count pulses, so it hands the STEP pin over:
+        stop() ends its thread within one PWM period, which the check waits
+        out before its first pulse. The stepper loop pauses meanwhile, and
+        service_step_check() restarts the PWM when the check ends.
+        """
+        if self.step_check is not None:
+            return
+        release_wait = 2.0 / self.pwm_frequency + 0.01
+        self.pwm.ChangeDutyCycle(0)
+        self.pwm.stop()
+        self.pwm = None
+        self.current_rpm = 0.0
+        self.gui.step_check_running = True
+        self._log_rpm(self.gui.now(), rpm)
+        self.step_check = StepCheck(GPIO, revolutions, rpm,
+                                    start_delay=release_wait)
+        self.step_check.start()
+
+    def cancel_step_check(self) -> None:
+        """Abort a running Check Steps (e.g. an experiment takes over)."""
+        if self.step_check is not None:
+            self.step_check.abort()
+
+    def service_step_check(self) -> None:
+        """Hardware loop: once a Check Steps run has ended, restart the step
+        PWM and hand the result to the interface."""
+        check = self.step_check
+        if check is None or check.is_alive():
+            return
+        try:
+            self._start_step_pwm()
+        except RuntimeError:
+            return  # the old PWM thread still holds the pin: retry next pass
+        self.step_check = None
+        self.current_rpm = 0.0  # the stepper loop re-applies its setpoint
+        self._log_rpm(self.gui.now(), 0.0)
+        self.gui.step_check_result = check.result
+        self.gui.step_check_running = False
 
     def monitor_temperature(self, current_time: float) -> None:
         """Read and graph the temperature WITHOUT driving the heater.

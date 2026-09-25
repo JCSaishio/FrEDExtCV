@@ -166,6 +166,7 @@ class Experiment:
         gui.heater_open_loop_enabled = False
         gui.dc_motor_open_loop_enabled = False
         gui.dc_motor_close_loop_enabled = False
+        gui.stepper_enabled = False
 
     def _all_systems_off_flags(self) -> None:
         """Clear every manual-control flag and request every output to zero."""
@@ -263,7 +264,7 @@ class Experiment:
             # phase-specific ``heat_extrude_speed`` (see override()).
             if tick:
                 self._drive_heater(t, extruder)
-                extruder.stepper_control_loop()
+                extruder.stepper_control_loop(t)
                 self._idle_spooler_fan(spooler, fan)
             self._tick_remaining(t, self._delay("heat_extrude_time"))
             if t - self.phase_start >= self._delay("heat_extrude_time"):
@@ -363,7 +364,7 @@ class Experiment:
         """One sample tick with every system on."""
         self._drive_heater(t, extruder)
         self._drive_spooler(t, spooler)
-        extruder.stepper_control_loop()
+        extruder.stepper_control_loop(t)
         self.gui.fan_enabled = True
         fan.control_loop()
 

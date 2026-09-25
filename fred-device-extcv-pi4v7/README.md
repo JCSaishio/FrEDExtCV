@@ -123,7 +123,7 @@ appends numbers, so drawing never slows the control loops.
 | **Passive Monitoring** | graph temperature and spooler RPM with no output driven (section 5) |
 | **Extruder Heater** | temperature setpoint slider, Temp Kp / Ki / Kd, heater open-loop PWM, Start Temperature Close Loop, Start Heater Open Loop, **STOP Heater** |
 | **Spooling DC Motor** | motor setpoint (RPM), Motor Kp / Ki / Kd (**limited to 1 / 15 / 0.05**), DC motor PWM, Start Motor Close Loop, Start DC Motor Open Loop, **STOP Spooling Motor** |
-| **Extrusion Motor** | extrusion speed (RPM), **STOP Stepper** |
+| **Extrusion Motor** | extrusion speed (RPM), **Start Stepper**, **Check Steps** (skipped-step check, section 9), **STOP Stepper** |
 | **Cooling Fan** | duty slider, STOP / Start Fan |
 | **Data Export** | file name + Download CSV File (manual CSV of everything logged) |
 
@@ -137,14 +137,33 @@ grey, **except the red STOP buttons**, which abort the run.
 ### One rate for control and data
 
 The **Sampling rate (Hz)** box (1–100, default **50**) sets how often the
-temperature loop and the spooler loop run — in manual mode, in monitoring, and
-in experiments. An experiment sent from the laptop brings its own rate
-(*FrED sample rate* on the laptop), which overrides the box during the run.
+temperature loop, the spooler loop and the stepper loop run — in manual mode,
+in monitoring, and in experiments. An experiment sent from the laptop brings
+its own rate (*FrED sample rate* on the laptop), which overrides the box
+during the run.
+
+**In manual mode the three loops are independent.** Each runs on its own
+timing, only while it is started:
+
+| Loop | Runs while | Started / stopped with |
+|---|---|---|
+| Temperature | a heater loop is on | Start Temperature Close Loop / Start Heater Open Loop — STOP Heater |
+| Spooler | a motor loop is on | Start Motor Close Loop / Start DC Motor Open Loop — STOP Spooling Motor |
+| Stepper | the stepper is started | **Start Stepper** — STOP Stepper |
+
+Until this version the stepper was only updated **inside** the two heater
+branches of `main.py` (MIT's upstream `main.py` still works that way), so the
+Extrusion Motor Speed did nothing unless a heater loop was running. Now the
+stepper turns with or without heating — with a cold barrel the screw pushes
+against solid plastic, which is why Start Stepper says so when no heater loop
+is on.
 
 During an experiment, **one tick** drives everything: the heater PID, the
 spooler PID, the stepper, the fan and the recorded data row, in that order and
 with the same timestamp. So control and data run at the **same frequency** and
-every recorded row holds fresh sensor readings.
+every recorded row holds fresh sensor readings. The stepper loop gates on the
+tick period exactly like the temperature and spooler loops, so it stays in
+step with the tick.
 
 The loop that schedules the ticks polls every 2 ms, so a tick happens up to a
 couple of milliseconds after it is due: a **50 Hz setting achieves about
@@ -200,6 +219,17 @@ started). It never jumps when the system time changes (e.g. NTP correcting the
 time after boot), so control loops cannot see a sudden huge or negative time
 step. Every recorded sample and the clock-sync replies use this clock.
 
+The stepper follows the same rule as every other signal (laptop README,
+*Time synchronisation*): each stepper sample is logged with its own time on
+this clock (`Database.extruder_timestamps`, also when the stepper is stopped
+or a Check Steps runs). In an experiment row, `Extruder RPM` comes from the
+same tick as the row. In the manual CSV (*Download CSV File*) the stepper no
+longer lines up one-to-one with the motor table's spooler rows, so each row
+gets the stepper setting **in force at that row's time** — held, never
+interpolated, the same way the laptop puts camera frames on FrED's rows.
+(Before, the column was paired by position, which put wrong values on rows
+whenever the two loops logged at different times.)
+
 ---
 
 ## 5. Manual operation: STOP buttons, monitoring, gain limits, CSV
@@ -213,12 +243,21 @@ Each actuator has its own red STOP button; stopping drives that output to
 |---|---|
 | **STOP Heater** | turns heating off (open- and closed-loop) and clears the PID state |
 | **STOP Spooling Motor** | stops the spooler (open- and closed-loop) and clears its PID state |
-| **STOP Stepper** | sets the extrusion speed to 0 and zeroes the stepper output |
+| **STOP Stepper** | stops the stepper and aborts a running Check Steps; the speed setting is kept |
 | **STOP / Start Fan** | holds the fan at 0 % (toggles back on without losing the slider value) |
 
-Restart heater / motor with their Start buttons; restart the stepper by
-raising **Extrusion Motor Speed**. During an experiment any red STOP aborts
-the whole run (section 6).
+Restart heater / motor with their Start buttons and the stepper with **Start
+Stepper**. During an experiment any red STOP aborts the whole run (section 6).
+
+### Extrusion stepper
+
+- **Start Stepper** runs the stepper at **Extrusion Motor Speed (RPM)**; the
+  speed can be changed while it runs (0 holds it still). It is independent of
+  the heater (section 4).
+- **STOP Stepper** stops it; press Start Stepper to run it again.
+- **Check Steps** turns exactly one revolution at the current speed so you can
+  see whether the motor skips steps (section 9). The normal stepper pauses
+  during the check and resumes afterwards if it was started.
 
 ### Passive Monitoring (read-only)
 
@@ -293,8 +332,9 @@ One row per tick during RECORDING, 18 columns:
 ### Rules while a run is active
 
 - Every control on this screen is disabled except the red STOP buttons.
-- The manual control loops (heater close/open loop, motor close/open loop)
-  are switched off when a run starts, so none of them resumes after the run.
+- The manual control loops (heater close/open loop, motor close/open loop,
+  the started stepper) are switched off when a run starts, so none of them
+  resumes after the run. A running Check Steps is aborted.
 - The graphs are cleared when the experiment arrives and again when RECORDING
   starts, so they show exactly the exported window.
 
@@ -383,34 +423,118 @@ that is intended.
 sudo raspi-config      # Interface Options -> SPI -> Enable, then reboot
 ```
 
-**Stepper: normal (full-step) mode.** The extrusion stepper (DRV8825
-driver) runs in the driver's normal full-step mode: one STEP pulse per motor
-step, so the pulse frequency is `RPM × 200 / 60` (`STEPS_PER_REVOLUTION = 200`
-in `extruder.py`). This matches MIT's current code
-([mit-fredfactory/fred-device](https://github.com/mit-fredfactory/fred-device)
-`main`, January 2026):
+### Stepper: 1/16 microstepping
 
-| Signal | BCM GPIO | Header pin | Set by `extruder.py` |
+The extrusion stepper (DRV8825 driver) runs at **1/16 microstepping**: 16 STEP
+pulses per full motor step, so the pulse frequency is
+`RPM × 200 × 16 / 60` (1067 pulses/s at the 20 RPM maximum). Microstepping
+is much quieter and smoother than full step, which shook the fiber. Every
+stepper setting lives in **`stepper_config.py`**, shared by `main.py` and the
+skipped-step checker:
+
+| Signal | BCM GPIO | Header pin | Driven to |
 |---|---|---|---|
 | STEP | 20 | 38 | step PWM, 50 % duty while running |
-| DIR | 16 | 36 | HIGH, fixed |
-| M0 / M1 / M2 | 17 / 27 / 22 | 11 / 13 / 15 | all LOW at startup = full step |
+| DIR | 16 | 36 | HIGH, fixed (extrusion direction) |
+| M0 / M1 / M2 | 17 / 27 / 22 | 11 / 13 / 15 | set from `MICROSTEPS` at startup: 1/16 = LOW / LOW / HIGH |
 
-Driving M0/M1/M2 LOW at every start guarantees full step even if an earlier
-program left a mode pin HIGH. (The earlier 1/16 microstepping drove GPIO22
-HIGH, and a Pi pin keeps its level until reboot or until a program sets it.)
-The step PWM is reprogrammed only when the RPM setpoint changes, as in
-MIT's `StepperMotor.set_speed`. Resetting it on every 2 ms loop pass could
-swallow step pulses, and in full step each lost pulse is a whole 1.8° step.
+**Changing the resolution:** edit `MICROSTEPS` in `stepper_config.py`, the
+section marked *MICROSTEPPING - CHANGE THE RESOLUTION HERE*. The program then
+sets M0/M1/M2 and the step frequency to match, so the RPM stays correct:
+
+| `MICROSTEPS` | M0 | M1 | M2 | Mode |
+|---|---|---|---|---|
+| 1 | LOW | LOW | LOW | full step |
+| 2 | HIGH | LOW | LOW | 1/2 |
+| 4 | LOW | HIGH | LOW | 1/4 |
+| 8 | HIGH | HIGH | LOW | 1/8 |
+| **16** | LOW | LOW | **HIGH** | **1/16 (in use)** |
+| 32 | HIGH | LOW | HIGH | 1/32 |
+
+- 1/16 only needs **M2** HIGH, so it works on boards where all three mode pins
+  are wired (MIT's pins, the same as
+  [mit-fredfactory/fred-device](https://github.com/mit-fredfactory/fred-device)
+  `main`) and on boards where only M2 reaches the driver. On the board where
+  microstepping was first set up, a continuity test found only M2 wired to
+  GPIO22; the DRV8825's internal pull-downs then hold M0/M1 LOW.
+- 1/2, 1/4, 1/8 and 1/32 also need **M0 and/or M1**: check with a multimeter
+  that GPIO17 / GPIO27 reach the driver's M0 / M1 pins first, otherwise the
+  motor turns at the wrong speed.
+- The pulses come from a software PWM, so keep the pulse rate moderate (1/32
+  at 20 RPM is 2133 pulses/s).
+- After a change, run a skipped-step check (below).
+- All three mode pins are driven at every start, so the resolution is known
+  whatever an earlier program left them at (a Pi pin keeps its level until
+  reboot or until a program sets it).
+
+The step PWM is reprogrammed only when the RPM setpoint changes, as in MIT's
+`StepperMotor.set_speed`: resetting it on every loop pass could swallow step
+pulses.
+
+History: v7 briefly ran the stepper in full step (commits `8cd6bd0`,
+`6c1d282`) to be independent of each board's mode-pin wiring; microstepping
+is back, with every mode selectable in one place.
 
 **Older boards:** in MIT's history, STEP moved from **BCM12** (header pin 32)
 to **BCM20** with **PCB 2.2** (June 2025). On a board older than PCB 2.2,
-change `STEP_PIN` in `extruder.py` to 12.
+change `STEP_PIN` in `stepper_config.py` to 12.
 
-Full step is louder and vibrates more than microstepping. To use
-microstepping, set the mode pins for the wanted resolution and multiply the
-step frequency in `Extruder.set_motor_speed` by the same factor, so the RPM
-setting stays correct.
+**`fred_terminal.py`** (section 10) is unchanged: it assumes full step and
+does not set the mode pins. After `main.py` has run, M2 stays HIGH (1/16)
+until the Pi reboots, so `fred_terminal.py`'s stepper then turns **16×
+slower** than asked. Reboot the Pi before using it.
+
+### Skipped-step check
+
+FrED has **no sensor on the extrusion motor**, so no program can detect a
+skipped step on its own. The check makes skips visible instead:
+
+1. Put a mark on the motor shaft or coupling (a tape flag works well) and
+   note what it points at.
+2. The check sends an **exact** number of step pulses: whole revolutions
+   (3200 steps per revolution at 1/16).
+3. At the end the mark must point exactly where it started. If it is short,
+   the motor skipped steps. A stall loses 4 full steps (7.2°) at a time, so
+   one slip is easy to see.
+
+The normal program's software PWM cannot count its pulses, so the check sends
+them one by one on an absolute schedule (`step_check.py`). A pulse that goes
+out late is never followed by a catch-up burst, which could itself cause a
+skip; the motor only pauses for a moment. The number of late pulses is shown
+as *Pi timing*.
+
+**In `main.py`: Check Steps** (Extrusion Motor panel). One revolution at the
+current Extrusion Motor Speed. It is the test to use **under real load**, with
+the barrel hot. It asks you to confirm, runs (the normal stepper pauses; STOP
+Stepper aborts), then asks whether the mark came back and gives advice if
+not. The result is also printed in the terminal.
+
+**In the terminal: `check_stepper.sh`** runs a speed sweep and reports the
+fastest speed with no skips. Close `main.py` first. The tool refuses to run
+while another FrED program drives the pins, and **closing `main.py`'s window
+does not end the program** (its hardware thread keeps running): stop it with
+`pkill -f main.py` or Ctrl+C in its terminal. With `main.py` closed the barrel
+is cold, so test with the motor decoupled or the barrel empty.
+
+```bash
+bash check_stepper.sh                          # 1, 2, 5, 10, 15, 20 RPM, 1 revolution each
+bash check_stepper.sh --speeds 1.5 3 6         # your own speeds
+bash check_stepper.sh --revs 2                 # 2 revolutions per test
+bash check_stepper.sh --microsteps 8           # try another resolution (needs M0/M1 wired)
+bash check_stepper.sh --reverse                # turn the other way
+python step_check.py --sim                     # dry run off the Pi
+```
+
+For each speed: Enter runs it, `s` skips it, `q` finishes. Then answer
+whether the mark is back (`y` / `n` / `r` to repeat), and if not, roughly how
+many degrees it is off. The tool converts that to full steps and asks whether
+to continue to faster speeds. Ctrl+C aborts a running test. The tool forces
+the heater output OFF at start: a killed FrED program leaves its pins at
+their last level, so the heater could be latched ON.
+
+If steps are skipped, the usual causes are: the speed is too high for the
+load, the driver current is too low (raise Vref a little), cold or stiff
+plastic in the barrel, or the screw binding mechanically.
 
 ---
 
@@ -450,6 +574,10 @@ prints phases, countdowns and readings in the terminal.
   - It does not answer clock-sync pings or START RECORDING NOW.
   - It does not send the recording start time, so the laptop cannot merge the
     diameter. The table is saved as FrED sent it, with a note.
+- **Stepper in full step.** It computes the step frequency for full step and
+  does not set the microstep pins, while `main.py` runs 1/16 (section 9). After
+  `main.py` has run, M2 stays HIGH until reboot and `fred_terminal.py`'s
+  stepper turns 16× slower than asked: reboot the Pi before using it.
 
 ### `motor_control.py` — spooler motor bench tool
 
@@ -531,7 +659,9 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `user_interface.py` | PyQt5 interface, the two graphs, the Pi clock `now()`, setpoint/gain accessors |
 | `experiment.py` | experiment state machine: phases, START RECORDING NOW, one-tick control + logging, recorded table |
 | `laptop_link.py` | TCP server for the laptop's commands and clock-sync pings (replaced `external_diameter.py`) |
-| `extruder.py` | heater (thermistor, PID, 1 s mean) + stepper (normal full-step mode) |
+| `extruder.py` | heater (thermistor, PID, 1 s mean) + stepper (own loop, 1/16 microstepping, Check Steps) |
+| `stepper_config.py` | stepper pins and **microstep resolution** (`MICROSTEPS`), shared by `extruder.py` and `step_check.py` |
+| `step_check.py`, `check_stepper.sh` | skipped-step check: exact step counts (Check Steps button + terminal speed sweep, section 9) |
 | `spooler.py` | spooling motor (encoder, windowed RPM, PID, calibration) |
 | `fan.py` | cooling fan |
 | `database.py` | logged data + manual CSV export |
@@ -547,6 +677,8 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `UserInterface.SAMPLE_RATE_LIMITS` | (1, 100) Hz | allowed sampling rates |
 | `Spooler.RPM_WINDOW` | 0.1 s | speed measurement window |
 | `Thermistor.AVERAGE_WINDOW` | 1.0 s | temperature mean for the PID |
+| `stepper_config.MICROSTEPS` | 16 | stepper microstep resolution (1, 2, 4, 8, 16, 32) |
+| `UserInterface.STEP_CHECK_REVOLUTIONS` | 1 | revolutions turned by Check Steps |
 | `main.LOOP_SLEEP` | 0.002 s | control-thread poll period |
 | `Plot.REDRAW_INTERVAL_MS`, `Plot.MAX_DRAWN_POINTS` | 100 ms, 1500 | graph refresh and thinning (display only) |
 | `LaptopLink.SEND_TIMEOUT`, `READ_TIMEOUT`, `IP_CACHE_S` | 30 s, 0.5 s, 10 s | network timing |
@@ -566,6 +698,10 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | Spooler oscillates at a high sampling rate | lower the rate (10 Hz = the original behaviour) and report it (section 4) |
 | Achieved rate stays orange | the requested rate is too high for the loop; lower it |
 | Retrieve Data waits forever | update the Pi (the 30 s send deadline fix); the laptop resets the link after 60 s |
+| Stepper does not turn when the speed is set | press **Start Stepper** (the stepper has its own start since the loops became independent) |
+| Stepper turns at the wrong speed (e.g. 16× too slow or 2× too fast) | `MICROSTEPS` does not match the wiring: 1/16 only needs M2; other modes need M0/M1 wired (section 9). After `main.py`, `fred_terminal.py` runs 16× slow until a reboot |
+| Stepper knocks / the shaft mark comes back short | skipped steps: run Check Steps or `bash check_stepper.sh`, then lower the speed, raise Vref a little, heat the barrel, or check the screw for binding |
+| `check_stepper.sh` says another FrED program is running | closing `main.py`'s window leaves it running: `pkill -f main.py`, then retry |
 
 ---
 
@@ -577,3 +713,11 @@ RECORDING NOW (skip-ahead and direct start), abort, one-tick logging (every
 row fresh), clock sync (t = 0 within 0.05 ms) and retrieval all worked. **Not
 yet verified on the real machine:** spooler stability at 50 Hz with the
 windowed speed, and the sync quality over the real hotspot.
+
+The independent stepper loop, 1/16 microstepping and the skipped-step check
+were tested the same way (real `main.py` + interface, simulated GPIO):
+Start/STOP Stepper with and without heater loops, 1/16 frequencies and mode
+pins, experiments taking over and the manual stepper not resuming, exactly
+3200 pulses per Check Steps revolution with no overlap with the PWM, aborts,
+and the held Extruder RPM in the manual CSV. **Not yet verified on the real
+machine.**

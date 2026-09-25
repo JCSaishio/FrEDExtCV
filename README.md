@@ -214,6 +214,8 @@ FrEDExtCV/
 │   ├── experiment.py                  #   experiment state machine, one-tick control + logging
 │   ├── laptop_link.py                 #   WiFi TCP server: commands, clock-sync replies
 │   ├── extruder.py / spooler.py / fan.py / database.py
+│   ├── stepper_config.py              #   stepper pins + microstep resolution (MICROSTEPS)
+│   ├── step_check.py / check_stepper.sh   # skipped-step check (terminal sweep; Check Steps button)
 │   ├── setup_install.sh / setup_hotspot.sh / start_fred.sh / requirements.txt
 │   ├── calibration.yaml
 │   └── fred_terminal.py, motor_control.py, heater_control.py,
