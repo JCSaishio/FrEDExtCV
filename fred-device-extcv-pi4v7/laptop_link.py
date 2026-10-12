@@ -6,9 +6,19 @@ temperature / spooler control loops and their two graphs. Once an experiment
 has been sent, this link is practically dormant: it only carries a few short
 command messages and a clock-sync ping every few seconds.
 
-The Pi is the **server**: it runs as a WiFi hotspot (see ``setup_hotspot.sh``)
-and listens on a TCP port; the laptop joins the hotspot and connects as a
-client. Messages are newline-delimited JSON objects with a ``type`` field.
+The Pi is the **server**: it listens on a TCP port and the laptop connects as
+a client. The WiFi network comes from one of two places (``setup_wifi.sh``):
+
+* **the hub** (normal): a separate Raspberry Pi 5 runs the ``FrED_Hub``
+  hotspot (``fred-hub-pi5/``); this Pi joins it at the fixed address
+  ``FRED_HUB_IP``. The laptop connects either straight to that address
+  ("Hub - direct") or to the hub, whose relay forwards every byte to this
+  server ("Hub - relay"; the connection then comes from ``HUB_IP``).
+* **its own hotspot** (fallback, the old way): this Pi is the ``FrED_Pi``
+  hotspot at ``HOTSPOT_IP`` (``setup_hotspot.sh``).
+
+This program is the same either way. Messages are newline-delimited JSON
+objects with a ``type`` field.
 
 Laptop -> Pi::
 
@@ -43,6 +53,14 @@ samples from an earlier Pi session are never mixed in.
 
 Diameter lines sent by an older laptop app (``{"v": 1, "d": ...}``) are
 ignored.
+
+Hub status ping (UDP ``STATUS_PORT``)
+-------------------------------------
+The hub's dashboard sends ``{"type": "hub_ping", "id": n}`` every 2 s on a
+separate UDP port, so it never touches the laptop's single TCP connection.
+This program answers ``{"type": "hub_pong", "id": n, ...}`` with whether a
+laptop is connected (and whether through the relay), the experiment status
+and the Pi's CPU load (``pi_load.py``).
 """
 import json
 import socket
@@ -56,14 +74,21 @@ if TYPE_CHECKING:
     from user_interface import UserInterface
 
 # --------------------------------------------------------------------------- #
-# Hotspot / network defaults. These MUST match what setup_hotspot.sh configures
-# and what the laptop app is pre-filled with, so the connection details shown
-# on screen are correct.
+# Network defaults. These MUST match setup_hotspot.sh / setup_wifi.sh, the
+# hub's hub.conf (fred-hub-pi5/) and the laptop app's presets, so the
+# connection details shown on screen are correct.
 # --------------------------------------------------------------------------- #
+# FrED's own hotspot (fallback: bash setup_wifi.sh hotspot)
 HOTSPOT_SSID = "FrED_Pi"
 HOTSPOT_PASSWORD = "fredfiber123"
 HOTSPOT_IP = "192.168.4.1"       # the Pi's address while acting as the hotspot
+# The hub Pi 5's network (normal: bash setup_wifi.sh hub)
+HUB_SSID = "FrED_Hub"
+HUB_PASSWORD = "fredfiber123"
+HUB_IP = "192.168.50.1"          # the hub; relayed connections come from here
+FRED_HUB_IP = "192.168.50.2"     # this Pi's fixed address on the hub
 LINK_PORT = 5005                 # TCP port the laptop connects to
+STATUS_PORT = 5006               # UDP port answering the hub's status pings
 
 
 class LaptopLink:
@@ -99,8 +124,13 @@ class LaptopLink:
         self._stop = threading.Event()
         self._buffer = b""
 
-        self._thread = threading.Thread(target=self._serve_loop, daemon=True)
+        self._thread = threading.Thread(target=self._serve_loop,
+                                        name="laptop-link", daemon=True)
         self._thread.start()
+        self._status_sock = None
+        self._status_thread = threading.Thread(target=self._status_loop,
+                                               name="hub-status", daemon=True)
+        self._status_thread.start()
 
     # ------------------------------------------------------------------ #
     # Sending messages back to the laptop (status, recorded data, sync)
@@ -162,7 +192,7 @@ class LaptopLink:
     # Network helpers
     # ------------------------------------------------------------------ #
     def local_ip_addresses(self) -> List[str]:
-        """Return this Pi's non-loopback IPv4 addresses (hotspot IP first).
+        """Return this Pi's non-loopback IPv4 addresses (hub / hotspot first).
 
         Cached for IP_CACHE_S seconds: ``hostname -I`` spawns a process, and
         the status label is refreshed twice a second.
@@ -184,17 +214,24 @@ class LaptopLink:
                     ips = [probe.getsockname()[0]]
             except Exception:
                 ips = []
-        # Show the hotspot address first if the Pi is running as the AP.
-        ips.sort(key=lambda ip: (not ip.startswith("192.168.4."), ip))
+        # The hub / hotspot address first: that is the one the laptop uses.
+        ips.sort(key=lambda ip: (ip not in (FRED_HUB_IP, HOTSPOT_IP), ip))
         self._ips, self._ips_time = ips, now
         return list(ips)
+
+    def wifi_mode(self) -> str:
+        """"hub" (joined the hub Pi 5), "hotspot" (this Pi is FrED_Pi) or
+        "other" (neither: see bash setup_wifi.sh)."""
+        ips = self.local_ip_addresses()
+        if FRED_HUB_IP in ips:
+            return "hub"
+        if HOTSPOT_IP in ips:
+            return "hotspot"
+        return "other"
 
     def primary_ip(self) -> str:
         """Best guess at the address the laptop should connect to."""
         ips = self.local_ip_addresses()
-        for ip in ips:
-            if ip.startswith("192.168.4."):
-                return ip
         return ips[0] if ips else HOTSPOT_IP
 
     # ------------------------------------------------------------------ #
@@ -314,19 +351,43 @@ class LaptopLink:
     # ------------------------------------------------------------------ #
     # Public access
     # ------------------------------------------------------------------ #
+    def via_hub(self) -> bool:
+        """True while the laptop is connected through the hub's relay."""
+        with self._lock:
+            return bool(self.client_address) and \
+                self.client_address[0] == HUB_IP
+
+    def link_description(self) -> str:
+        """How the laptop reaches FrED right now, for the run's metadata.
+        Uses the cached addresses only (never spawns a process), so the
+        hardware thread may call it."""
+        if self.via_hub():
+            return "hub relay"
+        ips = list(self._ips)
+        if FRED_HUB_IP in ips:
+            return "hub direct" if self.connected else "hub"
+        if HOTSPOT_IP in ips:
+            return "FrED hotspot"
+        return "other network"
+
     def connection_info(self) -> dict:
         """Everything the GUI needs to show the user how to connect."""
         with self._lock:
             client = (f"{self.client_address[0]}:{self.client_address[1]}"
                       if self.client_address else None)
+        mode = self.wifi_mode()
+        hub = mode == "hub"
         return {
-            "ssid": HOTSPOT_SSID,
-            "password": HOTSPOT_PASSWORD,
+            "mode": mode,
+            "ssid": HUB_SSID if hub else HOTSPOT_SSID,
+            "password": HUB_PASSWORD if hub else HOTSPOT_PASSWORD,
+            "hub_ip": HUB_IP,
             "ip": self.primary_ip(),
             "all_ips": self.local_ip_addresses(),
             "port": self.port,
             "listening": self.listening,
             "client": client,
+            "via_hub": self.via_hub(),
         }
 
     def status_text(self) -> str:
@@ -336,13 +397,65 @@ class LaptopLink:
         if not self.connected:
             return (f"Laptop link: waiting for laptop on "
                     f"{self.primary_ip()}:{self.port}")
-        return ("Laptop link: connected (commands only - the diameter is "
-                "measured and recorded on the laptop)")
+        how = "through the hub relay" if self.via_hub() else "directly"
+        return (f"Laptop link: connected {how} (commands only - the diameter "
+                "is measured and recorded on the laptop)")
+
+    # ------------------------------------------------------------------ #
+    # Hub status ping (UDP) - see the module doc
+    # ------------------------------------------------------------------ #
+    def _hub_pong(self, ping_id) -> dict:
+        with self._lock:
+            client = (f"{self.client_address[0]}:{self.client_address[1]}"
+                      if self.client_address else None)
+        experiment = getattr(self.gui, "experiment", None)
+        monitor = getattr(self.gui, "load_monitor", None)
+        return {
+            "type": "hub_pong",
+            "id": ping_id,
+            "program": "main.py",
+            "version": "v7",
+            "boot": self.boot_id,
+            "uptime_s": round(self.gui.now(), 1),
+            "laptop": client,
+            "laptop_via_hub": self.via_hub(),
+            "phase": experiment.phase if experiment else None,
+            "experiment": experiment.status_line() if experiment else None,
+            "load": monitor.hub_report() if monitor else None,
+        }
+
+    def _status_loop(self) -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, STATUS_PORT))
+            sock.settimeout(1.0)
+        except OSError as exc:
+            print(f"[LaptopLink] Hub status port {STATUS_PORT} unavailable "
+                  f"({exc}); the hub will show 'no answer'.")
+            return
+        self._status_sock = sock
+        while not self._stop.is_set():
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                return              # socket closed by close()
+            try:
+                message = json.loads(data.decode("utf-8", errors="ignore"))
+                if not isinstance(message, dict) or \
+                        message.get("type") != "hub_ping":
+                    continue
+                reply = self._hub_pong(message.get("id"))
+                sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+            except Exception as exc:     # never let the hub break the link
+                print(f"[LaptopLink] Hub status reply failed: {exc}")
 
     def close(self) -> None:
         """Stop the server thread and release the sockets."""
         self._stop.set()
-        for sock in (self._client_sock, self._server_sock):
+        for sock in (self._client_sock, self._server_sock, self._status_sock):
             if sock is not None:
                 try:
                     sock.close()
@@ -350,5 +463,6 @@ class LaptopLink:
                     pass
         self._client_sock = None
         self._server_sock = None
+        self._status_sock = None
         self.listening = False
         self.connected = False

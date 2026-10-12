@@ -11,11 +11,14 @@ Raspberry Pi.
   the laptop.
 - When an experiment's data is retrieved, both data sets are merged onto
   **one clock-synchronised timeline** in the same CSV + Excel files.
+- A **hub Raspberry Pi 5** runs the WiFi both of them join, so FrED's Pi 4 no
+  longer has to be the hotspot (FrED's own hotspot stays as a fallback).
 
 | Folder | Runs on | What it is | Details |
 |---|---|---|---|
-| [`fred-device-extcv-pi4v7/`](fred-device-extcv-pi4v7/) | **Raspberry Pi 4** | Machine control: PyQt5 interface with temperature + spooler graphs, the control loops, the WiFi hotspot + command server, the experiment engine. Entry point `main.py` (via `start_fred.sh`). | [Pi README](fred-device-extcv-pi4v7/README.md) |
-| [`FrEDFiberMeasurewithStreamingv7/`](FrEDFiberMeasurewithStreamingv7/) | **Windows laptop** | Fiber measurement (tkinter + OpenCV): threaded camera pipeline, live diameter graph, calibration, the Experiment tab, START RECORDING NOW / MARK STEADY STATE, the merged export. Entry point `fiber_measure.py` (via `Run FrED Fiber Measure.bat`). | [Laptop README](FrEDFiberMeasurewithStreamingv7/README.md) |
+| [`fred-device-extcv-pi4v7/`](fred-device-extcv-pi4v7/) | **Raspberry Pi 4** | Machine control: PyQt5 interface with temperature + spooler graphs and a **Pi load (CPU)** box, the control loops, the command server, the experiment engine. WiFi: joins the hub (`setup_wifi.sh hub`) or is its own hotspot (fallback). Entry point `main.py` (via `start_fred.sh`). | [Pi README](fred-device-extcv-pi4v7/README.md) |
+| [`FrEDFiberMeasurewithStreamingv7/`](FrEDFiberMeasurewithStreamingv7/) | **Windows laptop** | Fiber measurement (tkinter + OpenCV): threaded camera pipeline, live diameter graph, calibration, the Experiment tab, START RECORDING NOW / MARK STEADY STATE, the merged export, the **Network** box (hub direct / hub relay / FrED hotspot). Entry point `fiber_measure.py` (via `Run FrED Fiber Measure.bat`). | [Laptop README](FrEDFiberMeasurewithStreamingv7/README.md) |
+| [`fred-hub-pi5/`](fred-hub-pi5/) | **Raspberry Pi 5** (hub) | The WiFi **`FrED_Hub`** that FrED and the laptop join, a terminal **dashboard** (signal and ping of both devices, FrED's program state and CPU) and an optional **relay** between them. Entry point `hub.py` (via `start_hub.sh`); Python standard library only. | [Hub README](fred-hub-pi5/README.md) |
 
 This page is the overview. Each folder's README is the complete manual.
 
@@ -28,8 +31,8 @@ This page is the overview. Each folder's README is the complete manual.
  ┌─────────────────────────────────┐                ┌──────────────────────────────────┐
  │ camera ─► capture thread        │                │ hardware thread (polls every 2ms)│
  │            (timestamp)          │    WiFi TCP    │   one tick at the sample rate:   │
- │         ─► measure thread       │   (FrED_Pi,    │   heater PID ─ spooler PID ─     │
- │            (every frame)        │  192.168.4.1   │   stepper ─ fan ─ data row       │
+ │         ─► measure thread       │  (via the hub  │   heater PID ─ spooler PID ─     │
+ │            (every frame)        │  Pi 5's WiFi   │   stepper ─ fan ─ data row       │
  │         ─► measurement log ─────┼──────┐ :5005)  │                                  │
  │            (laptop clock)       │      │         │ experiment state machine         │
  │ live diameter graph             │  commands ───► │   HEATING ► EXTRUDING ► SETTLE   │
@@ -55,17 +58,45 @@ commands (`experiment`, `start_now`, `abort`, `get_data`), a few-byte sync ping
 every 2 s, and FrED's replies (`status`, `sync_reply`, `data`). This freed the
 Pi's CPU for its control loops.
 
+**The network.** To take the hotspot work off FrED's Pi 4 as well, a separate
+Raspberry Pi 5 (the **hub**) runs the WiFi. Pick the path in the laptop's
+*Network* box. All three carry exactly the same messages, so they can be
+compared:
+
+```
+ Hub - direct   LAPTOP ─WiFi─► HUB Pi 5 ─WiFi─► FrED 192.168.50.2:5005
+ (default)                     (FrED_Hub, 192.168.50.1: forwards the packets;
+                                its dashboard pings and watches both devices)
+
+ Hub - relay    LAPTOP ─WiFi─► HUB 192.168.50.1:5005 ─► relay program ─WiFi─► FrED 192.168.50.2:5005
+                               (copies every message unchanged, counts and times them)
+
+ FrED hotspot   LAPTOP ─WiFi FrED_Pi─► FrED 192.168.4.1:5005      (fallback, the old way)
+```
+
+FrED switches with `bash setup_wifi.sh hub` / `hotspot` (once; remembered
+across boots). Its **Pi load (CPU)** box, the laptop's **round trip** and
+every run's *Run info* show which works best (Pi README section 14).
+
 ---
 
 ## Quick start
 
-**Raspberry Pi**
+**Hub Raspberry Pi 5** (clone the repository on it, like on FrED)
+
+```bash
+cd fred-hub-pi5
+bash setup_install.sh    # once, with internet: tools + the FrED_Hub hotspot (then up at every boot)
+bash start_hub.sh        # dashboard + relay (q quits; the hotspot keeps running)
+```
+
+**FrED Raspberry Pi 4**
 
 ```bash
 cd fred-device-extcv-pi4v7
 bash setup_install.sh    # fresh Pi only
 git pull                 # to update an existing Pi (then restart the program)
-bash setup_hotspot.sh    # once per boot: start the FrED_Pi WiFi hotspot
+bash setup_wifi.sh hub   # once: join the hub's WiFi (fallback: bash setup_wifi.sh hotspot)
 bash start_fred.sh       # run FrED
 ```
 
@@ -76,11 +107,13 @@ folder, so no reinstall is needed (details in the Pi README, section 2).
 
 **Laptop** (once: `setup_install.bat`)
 
-1. Join the Wi-Fi **`FrED_Pi`** (password `fredfiber123`).
+1. Join the Wi-Fi **`FrED_Hub`** (password `fredfiber123`), or `FrED_Pi`
+   if FrED is on its own hotspot.
 2. Double-click **`Run FrED Fiber Measure.bat`** in
    `FrEDFiberMeasurewithStreamingv7/`.
 3. **Calibrate** the camera (px → mm) — *Measure & Connect* tab.
-4. *Measure & Connect* → IP `192.168.4.1`, port `5005` → **Connect**.
+4. *Measure & Connect* → **Network** = *Hub - direct to FrED* (or *Hub -
+   relay through the hub* / *FrED hotspot (old way)*) → **Connect**.
 
 ---
 
@@ -190,6 +223,8 @@ compatible with the v7 laptop app**. See the Pi README, section 10.
 | v5 | Pi: **Reset Graphs**, adjustable sampling rate with live read-out, plot redraw moved off the control thread. |
 | v6 | **Remote automated experiments** (bidirectional protocol), es-MX CSV export, controls locked during runs, diameter jitter filter, formatted Excel with charts, Retrieve Data progress dialog and hang fix. |
 | **v7** | **Diameter native to the laptop** (no streaming; threaded capture measures every frame; live graph on the laptop), **clock-synchronised merge** with new-sample flags and a full-rate camera sheet, **START RECORDING NOW**, **MARK STEADY STATE**, FrED control + data at **one rate** with windowed speed / temperature, spooler gain limits **1 / 15 / 0.05**, monotonic Pi clock. |
+| v7 + stepper | Independent extrusion-stepper loop with **Start Stepper**, 1/16 microstepping, skipped-step check. |
+| **v7 + hub** | **Hub Raspberry Pi 5** runs the WiFi (`fred-hub-pi5/`: installer, hotspot, dashboard, relay); FrED joins it (`setup_wifi.sh`; its own hotspot kept as fallback); laptop **Network** box (hub direct / hub relay / FrED hotspot) with a live **round trip**; FrED **Pi load (CPU)** box; network + CPU written into *Run info*. |
 
 **v7 needs both sides updated** (`git pull` on the Pi).
 
@@ -197,9 +232,13 @@ compatible with the v7 laptop app**. See the Pi README, section 10.
 
 1. The spooler is stable at the chosen sample rate (try 50 Hz; 10 Hz gives
    the original behaviour).
-2. The laptop's `clock sync ±… ms` over the real hotspot (expect a few ms).
+2. The laptop's `clock sync ±… ms` and `round trip` over the real WiFi
+   (expect a few ms).
 3. *Run info* of the first file: the achieved FrED rate, camera fps, and rows
    with a diameter.
+4. The hub: FrED and the laptop appear on its dashboard. Then compare FrED
+   hotspot vs. Hub - direct vs. Hub - relay with the procedure in the Pi
+   README, section 14.
 
 ---
 
@@ -212,19 +251,27 @@ FrEDExtCV/
 │   ├── main.py                        #   entry point (hardware thread + GUI)
 │   ├── user_interface.py              #   PyQt5 GUI: temperature + spooler graphs, Pi clock
 │   ├── experiment.py                  #   experiment state machine, one-tick control + logging
-│   ├── laptop_link.py                 #   WiFi TCP server: commands, clock-sync replies
+│   ├── laptop_link.py                 #   WiFi TCP server: commands, clock-sync replies, hub status port
+│   ├── pi_load.py                     #   Pi load (CPU) readout
 │   ├── extruder.py / spooler.py / fan.py / database.py
 │   ├── stepper_config.py              #   stepper pins + microstep resolution (MICROSTEPS)
 │   ├── step_check.py / check_stepper.sh   # skipped-step check (terminal sweep; Check Steps button)
-│   ├── setup_install.sh / setup_hotspot.sh / start_fred.sh / requirements.txt
+│   ├── setup_install.sh / start_fred.sh / requirements.txt
+│   ├── setup_wifi.sh / setup_hotspot.sh   # WiFi mode: join the hub, or be the hotspot (fallback)
 │   ├── calibration.yaml
 │   └── fred_terminal.py, motor_control.py, heater_control.py,
 │       FrED_functions.py, signal_filter.py   # teammate's separate tools (not used by main.py)
-└── FrEDFiberMeasurewithStreamingv7/   # Windows laptop — CV, graph, experiments (Laptop README)
-    ├── fiber_measure.py               #   the application
-    ├── Run FrED Fiber Measure.bat     #   double-click launcher
-    ├── setup_install.py / setup_install.bat / requirements.txt
-    └── calibration.json
+├── FrEDFiberMeasurewithStreamingv7/   # Windows laptop — CV, graph, experiments (Laptop README)
+│   ├── fiber_measure.py               #   the application
+│   ├── Run FrED Fiber Measure.bat     #   double-click launcher
+│   ├── setup_install.py / setup_install.bat / requirements.txt
+│   └── calibration.json
+└── fred-hub-pi5/                      # Raspberry Pi 5 hub — WiFi, dashboard, relay (Hub README)
+    ├── hub.py                         #   dashboard + relay + pings (standard library only)
+    ├── hub.conf                       #   every network setting of the hub
+    ├── setup_install.sh               #   installer (tools + hotspot at boot)
+    ├── hub_hotspot.sh                 #   the FrED_Hub hotspot: up / down / status
+    └── start_hub.sh                   #   app runner
 ```
 
 Working rule for this repo: every change is committed **and pushed** so the

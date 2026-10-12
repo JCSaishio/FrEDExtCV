@@ -7,7 +7,10 @@ laptop's diameter data with FrED's temperature / spooler data.
 
 This program runs on the **Windows laptop**. Its partner is the Raspberry Pi
 program in [`../fred-device-extcv-pi4v7/`](../fred-device-extcv-pi4v7/), which
-runs the heater, extruder, spooler and fan. Both sides must run v7.
+runs the heater, extruder, spooler and fan. Both sides must run v7. The WiFi
+normally comes from a third device, the **hub Pi 5**
+([`../fred-hub-pi5/`](../fred-hub-pi5/)); the *Network* box picks how to reach
+FrED (section 6).
 
 ---
 
@@ -231,19 +234,75 @@ clean white band.
 
 ## 6. Connecting to FrED
 
-1. On the **Pi**: `bash setup_hotspot.sh` (once per boot) and start the Pi
-   program. Its screen shows the Wi-Fi name / password and the IP + port.
-2. On the **laptop**: join the Wi-Fi **`FrED_Pi`** (password `fredfiber123`).
-3. *Measure & Connect* → **FrED connection (WiFi)**: IP `192.168.4.1`, port
-   `5005` (pre-filled; type what the Pi shows if different) → **Connect**.
+The WiFi network can come from two places:
 
-After connecting, the status reads e.g. `Connected to 192.168.4.1:5005 |
-clock sync ±1.2 ms (40 pings)`. The laptop sends a burst of 10 sync pings at
-once, then one every 2 s. `clock sync: waiting` means FrED is not answering
-pings — it is probably running pre-v7 software (`git pull` on the Pi).
+- **the hub** (normal): a separate Raspberry Pi 5 runs the WiFi **`FrED_Hub`**
+  ([`../fred-hub-pi5/`](../fred-hub-pi5/)); FrED and this laptop both join it.
+  This takes the hotspot work off FrED's Pi 4.
+- **FrED's own hotspot** (fallback, the old way): FrED's Pi 4 is the WiFi
+  **`FrED_Pi`**.
+
+FrED's screen says which one it is on (*WiFi mode: HUB* / *FrED HOTSPOT*).
+Pick the matching entry in the **Network** box (*Measure & Connect* → **FrED
+connection (WiFi)**); it fills in the address and tells you which WiFi to
+join:
+
+| Network box | Join this WiFi (password `fredfiber123`) | Connects to | How the messages travel |
+|---|---|---|---|
+| **Hub - direct to FrED** (default) | `FrED_Hub` | `192.168.50.2 : 5005` | laptop → hub's WiFi → FrED; the hub only forwards the radio packets, like a router |
+| **Hub - relay through the hub** | `FrED_Hub` | `192.168.50.1 : 5005` | laptop → a program on the hub (`start_hub.sh` must be running) → FrED; the hub copies every message unchanged and can count / time them |
+| **FrED hotspot (old way)** | `FrED_Pi` | `192.168.4.1 : 5005` | laptop → FrED directly |
+
+Steps:
+
+1. **FrED:** start the Pi program (`bash start_fred.sh`). For the hub modes,
+   FrED must be on the hub (`bash setup_wifi.sh hub`, once); for the
+   fallback, `bash setup_wifi.sh hotspot`.
+2. **Laptop:** join the WiFi the Network box names (Windows WiFi menu; tick
+   *Connect automatically* to make it stick).
+3. Pick the **Network** entry → **Connect**. You can still type another IP /
+   port by hand (shown as *custom address*).
+
+After connecting, the status reads e.g. `Connected to 192.168.50.2:5005 (Hub -
+direct to FrED) | clock sync ±1.2 ms (40 pings) | round trip 4.3 ms (max 12)`.
+The laptop sends a burst of 10 sync pings at once, then one every 2 s.
+**round trip** is how long a ping takes there and back (median of the last
+30, and the slowest): **lower and steadier is better** — it is the number to
+compare the three modes with, together with *clock sync ±*. Both are also
+written into every run's *Run info*. `clock sync: waiting` means FrED is not
+answering pings — it is probably running pre-v7 software (`git pull` on the
+Pi).
 
 The Pi re-announces its current phase every time the laptop (re)connects, so
-the laptop always knows where a run stands.
+the laptop always knows where a run stands. If FrED (or the hub relay) closes
+the connection, the status changes to *Link lost - reconnect to resume*.
+
+**Relay messages.** In *Hub - relay* mode the hub explains a refused
+connection in a *Hub relay* message box: FrED not reachable (is FrED on the
+hub WiFi and its program running?), another laptop already connected through
+the relay, or another laptop connected to FrED directly (FrED takes one
+laptop at a time).
+
+### What changes on this laptop with the hub
+
+- **Update the app** (`git pull` in the repository, or copy the new
+  `fiber_measure.py`). Nothing new to install.
+- **Join `FrED_Hub`** instead of `FrED_Pi` (same password). If the hub Pi 5
+  has an ethernet cable with internet, the laptop even has internet while on
+  `FrED_Hub`.
+- Keep the Network box on **Hub - direct to FrED** (default) or try **Hub -
+  relay**.
+- *Optional — let the hub ping the laptop.* Windows blocks incoming ping by
+  default, so the hub's dashboard shows the laptop's ping as lost (the link
+  itself is not affected). To allow it, open **PowerShell as administrator**
+  once and run:
+  `netsh advfirewall firewall add rule name="FrED hub ping" protocol=icmpv4:8,any dir=in action=allow`
+  (remove it with `netsh advfirewall firewall delete rule name="FrED hub ping"`).
+- *Optional — steadier WiFi timing.* Windows' WiFi power saving can add
+  delay spikes. Device Manager → *Network adapters* → your WiFi adapter →
+  *Advanced* → set *Power Saving Mode* / *MIMO Power Save Mode* to *Off /
+  Maximum Performance* (names vary by adapter), and run the laptop plugged in.
+  Compare the *round trip* before and after.
 
 ---
 
@@ -448,8 +507,12 @@ FrED row, so its first time can be a few ms below 0.
 - Sheet **Camera (full rate)** — the camera CSV.
 - Sheet **Run info** — experiment name and save time; what t = 0 is (timer or
   START RECORDING NOW); the time-alignment method; clock-sync pings, offset,
-  drift (ppm) and **estimated alignment error (ms)**; FrED rows and achieved
-  rate; recording duration; camera frames, fps and detections; rows with a
+  drift (ppm) and **estimated alignment error (ms)**; the **Network** used
+  (laptop's Network box + address, and FrED's own view: *hub direct* / *hub
+  relay* / *FrED hotspot*) and the **Link round trip** (median, min, 95 %,
+  max over the session); FrED rows and achieved rate; **FrED CPU during
+  recording** and its per-thread split (FrED's Pi load box averaged over
+  the recording); recording duration; camera frames, fps and detections; rows with a
   diameter / with a new frame; diameter unit; steady-state time; explanations
   of the flag columns and the filter; the camera-latency setting; and every
   experiment parameter.
@@ -557,8 +620,10 @@ Measured on the development laptop (camera: 640 × 480, ~30 fps):
 | Same simulation, naive "arrival time" method | ~7 ms off on average, up to 300 ms |
 | End to end: real Pi program (simulated hardware) + this app (simulated camera whose fiber width changes at known instants) | t = 0 within **0.02–0.05 ms** of the truth; **every** row showed the width the camera saw at that instant; START RECORDING NOW both skipped a 30 s settle and started a run from idle; the steady-state column switched at the pressed time; a Ki of 20 was refused and 12.5 accepted |
 
-**Not yet verified on the real machine:** sync quality over the real hotspot
-(shown live in the status and in every file's *Run info*).
+| Hub modes, localhost (real FrED server + real hub relay + this app's link) | 30/30 sync replies and a 2.7 MB data retrieval through the relay, intact; the relay added ~0.2–0.6 ms round trip on this PC; refusals (relay busy, another laptop direct, FrED down) arrive as *Hub relay* messages; a closed link shows *Link lost* |
+
+**Not yet verified on the real machine:** sync quality over the real WiFi
+(hub or hotspot; shown live in the status and in every file's *Run info*).
 
 ---
 
@@ -569,6 +634,9 @@ Measured on the development laptop (camera: 640 × 480, ~30 fps):
 | `Camera: not available` | wrong **Index**, or another program is using the camera; fix and **Reconnect** |
 | *measured* fps below camera fps, or *dropped* growing | resolution too high for this laptop (1080p ≈ 10 ms/frame) or the laptop is busy; lower the resolution |
 | Sync status stays `clock sync: waiting` | FrED is not answering pings: update the Pi (`git pull`, restart) |
+| *Connect failed* | the laptop is not on the WiFi the Network box names, FrED is on the other network (its screen shows *WiFi mode*), or FrED's program is not running; in *Hub - relay* also check `start_hub.sh` runs on the hub |
+| *Hub relay* message box | read it: FrED unreachable from the hub, or another laptop is connected (relay or direct) — FrED takes one laptop at a time |
+| *round trip* high or jumpy | weak signal (the hub's dashboard shows dBm), WiFi power saving on the laptop (section 6), or a crowded 2.4 GHz band (the hub can use 5 GHz: `BAND="a"` in `hub.conf`) |
 | Retrieve note "FrED is running older software" | the Pi is on pre-v7 code; the file is saved as FrED sent it, without the camera merge — `git pull` on the Pi |
 | Diameter columns empty | the app was closed/restarted after the run, the camera was not running, or no timing could be established — *Run info* → *Time alignment* says which |
 | Diameter in px instead of mm | calibrate (section 5) |

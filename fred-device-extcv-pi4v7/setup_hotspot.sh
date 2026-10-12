@@ -21,6 +21,10 @@
 # NOTE: while the Pi is a hotspot, its built-in WiFi is used for the access
 # point and is NOT connected to the internet. That is expected and is exactly
 # what we want for a guaranteed, self-contained link to the laptop.
+#
+# Since the hub Pi 5 (fred-hub-pi5/) this is the FALLBACK mode; the normal
+# mode is `bash setup_wifi.sh hub`. `bash setup_wifi.sh hotspot` runs this
+# script. Starting the hotspot here also stops FrED joining the hub.
 
 set -euo pipefail
 
@@ -30,6 +34,7 @@ PASSWORD="fredfiber123"
 CON_NAME="FrED_Hotspot"
 IFACE="wlan0"
 PI_IP="192.168.4.1"
+HUB_CLIENT_CON="FrED_Hub_Client"   # setup_wifi.sh hub's profile
 # --------------------------------------------------------------------------- #
 
 ACTION="${1:-up}"
@@ -61,6 +66,7 @@ case "$ACTION" in
     sudo nmcli connection down "$CON_NAME" 2>/dev/null || true
     printf "Hotspot stopped. NetworkManager will reconnect to your normal "
     printf "WiFi if one is configured.\n"
+    printf "(To use the hub Pi 5 instead:  bash setup_wifi.sh hub)\n"
     exit 0
     ;;
   status)
@@ -79,6 +85,14 @@ esac
 printf "\n=== Configuring FrED WiFi hotspot ===\n"
 printf "SSID: %s    Password: %s    Pi IP: %s\n\n" "$SSID" "$PASSWORD" "$PI_IP"
 
+# Being the hotspot and joining the hub share the one WiFi radio: stop
+# joining the hub (now and at boot) so the two never fight over it.
+if nmcli -t -f NAME connection show | grep -qx "$HUB_CLIENT_CON"; then
+  printf "Leaving hub mode ('%s' will not autoconnect)...\n" "$HUB_CLIENT_CON"
+  sudo nmcli connection modify "$HUB_CLIENT_CON" connection.autoconnect no
+  sudo nmcli connection down "$HUB_CLIENT_CON" 2>/dev/null || true
+fi
+
 # Create the connection profile if it does not already exist.
 if ! nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
   printf "Creating connection profile '%s'...\n" "$CON_NAME"
@@ -93,7 +107,8 @@ sudo nmcli connection modify "$CON_NAME" \
   ipv4.method shared \
   ipv4.addresses "${PI_IP}/24" \
   wifi-sec.key-mgmt wpa-psk \
-  wifi-sec.psk "$PASSWORD"
+  wifi-sec.psk "$PASSWORD" \
+  connection.autoconnect yes
 
 printf "Starting hotspot...\n"
 sudo nmcli connection up "$CON_NAME"
@@ -102,7 +117,8 @@ show_status
 
 printf "Hotspot is up. On the laptop:\n"
 printf "  1) Connect to WiFi '%s' (password '%s').\n" "$SSID" "$PASSWORD"
-printf "  2) Open 'FrED Fiber Measure' (v7), set IP %s, port 5005, then Connect.\n" "$PI_IP"
+printf "  2) Open 'FrED Fiber Measure' (v7), pick Network 'FrED hotspot'\n"
+printf "     (IP %s, port 5005), then Connect.\n" "$PI_IP"
 printf "  3) Send experiments from its 'Experiment (FrED)' tab (the diameter is\n"
 printf "     measured and graphed on the laptop).\n\n"
 printf "To stop the hotspot later:  bash setup_hotspot.sh down\n\n"

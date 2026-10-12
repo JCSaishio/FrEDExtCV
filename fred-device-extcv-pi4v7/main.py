@@ -134,7 +134,9 @@ if __name__ == "__main__":
     ui = UserInterface()
     time.sleep(2)
 
-    hardware_thread = threading.Thread(target=hardware_control, args=(ui,))
+    # Named so the Pi-load readout (pi_load.py) can show its CPU share.
+    hardware_thread = threading.Thread(target=hardware_control, args=(ui,),
+                                       name="hardware")
     hardware_thread.start()
     threading.Lock()
 

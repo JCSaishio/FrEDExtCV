@@ -11,6 +11,12 @@ It installs into a Python virtual environment (`fred-venv`); the program is
 **`main.py`** (started by `start_fred.sh`). Both the Pi and the laptop must
 run v7.
 
+**WiFi:** normally FrED joins the WiFi of a separate **hub Pi 5**
+([`../fred-hub-pi5/`](../fred-hub-pi5/)), so this Pi 4 no longer has to run
+the hotspot; its own `FrED_Pi` hotspot stays as a fallback
+(`bash setup_wifi.sh hub|hotspot`, section 8). The **Pi load (CPU)** box shows
+how busy the Pi is (section 14).
+
 ---
 
 ## Contents
@@ -22,12 +28,13 @@ run v7.
 5. [Manual operation: STOP buttons, monitoring, gain limits, CSV](#5-manual-operation-stop-buttons-monitoring-gain-limits-csv)
 6. [Remote experiments](#6-remote-experiments)
 7. [The laptop link (protocol)](#7-the-laptop-link-protocol)
-8. [WiFi hotspot](#8-wifi-hotspot)
+8. [WiFi: the hub Pi 5 or FrED's own hotspot](#8-wifi-the-hub-pi-5-or-freds-own-hotspot)
 9. [Hardware notes: SPI and the stepper](#9-hardware-notes-spi-and-the-stepper)
 10. [Other tools in this folder (not used by main.py)](#10-other-tools-in-this-folder-not-used-by-mainpy)
 11. [Required libraries](#11-required-libraries)
 12. [Modules and tuning constants](#12-modules-and-tuning-constants)
 13. [Troubleshooting](#13-troubleshooting)
+14. [Measuring the Pi load (CPU box)](#14-measuring-the-pi-load-cpu-box)
 
 ---
 
@@ -47,8 +54,10 @@ spooler PID loops. **In v7 the Pi does control only:**
 | Control rate vs. data rate | control 10 Hz, data rows 50 Hz (repeated values) | **one rate for both** (default 50 Hz), clean measurements via time windows |
 | Clock | wall clock (could jump when the time is set) | **monotonic** experiment clock |
 
-The WiFi hotspot and the TCP server stay, so the laptop can connect, send an
-experiment, press START RECORDING NOW / ABORT, and retrieve the data.
+The TCP server stays, so the laptop can connect, send an experiment, press
+START RECORDING NOW / ABORT, and retrieve the data. Since the hub, the WiFi
+network itself normally comes from the hub Pi 5 instead of this Pi (section
+8).
 
 ---
 
@@ -60,12 +69,18 @@ The repository is cloned on the Pi.
 cd fred-device-extcv-pi4v7
 
 bash setup_install.sh     # ONLY on a fresh Pi (apt packages + fred-venv + pip)
-bash setup_hotspot.sh     # once per boot: start the FrED_Pi WiFi hotspot
+bash setup_wifi.sh hub    # ONCE: join the hub Pi 5's WiFi (kept across boots)
 bash start_fred.sh        # every time: activates fred-venv and runs main.py
 ```
 
+`bash setup_wifi.sh hotspot` switches back to FrED's own `FrED_Pi` hotspot
+(the old way); `bash setup_wifi.sh status` shows the current mode. Both
+choices are remembered across reboots (section 8).
+
 **Update to the latest code:** `git pull` in the repository folder, then
-restart the program. No reinstall is needed.
+restart the program. No reinstall is needed. (With the hub: `git pull` needs
+internet — plug an ethernet cable into the **hub** Pi 5 and FrED gets
+internet through it, or plug one into FrED itself.)
 
 **First update after the v7 folder rename.** This folder was called
 `fred-device-extcv-pi4v6` before v7. On a Pi that still has the old folder:
@@ -118,7 +133,8 @@ appends numbers, so drawing never slows the control loops.
 
 | Panel | Contents |
 |---|---|
-| **Laptop Link (WiFi)** | the Wi-Fi name, password, IP and port to type on the laptop; the experiment status (phase and time left); the link status (green = laptop connected, red = waiting) |
+| **Laptop Link (WiFi)** | the **WiFi mode** (HUB / FrED HOTSPOT / neither), the Wi-Fi name, password and the address(es) to use on the laptop; whether the laptop is connected **directly** or **through the hub relay**; the experiment status (phase and time left); the link status (green = laptop connected, red = waiting) |
+| **Pi load (CPU)** | how busy the Pi is, averaged over 10 s: whole-Pi CPU, `main.py`'s share, the rest of the system, per-thread split, temperature, clock speed and power state (section 14) |
 | **Graphs & Sampling** | Reset Graphs, the **Sampling rate (Hz)** box and the achieved-rate read-out (section 4) |
 | **Passive Monitoring** | graph temperature and spooler RPM with no output driven (section 5) |
 | **Extruder Heater** | temperature setpoint slider, Temp Kp / Ki / Kd, heater open-loop PWM, Start Temperature Close Loop, Start Heater Open Loop, **STOP Heater** |
@@ -374,7 +390,7 @@ client. Messages are one JSON object per line, each with a `type`.
 | Message | Meaning |
 |---|---|
 | `{"type": "status", "phase", "remaining", "message", "data_ready", "t0"?}` | sent at every phase change and on every (re)connection; `t0` = recording start on the Pi clock |
-| `{"type": "data", "name", "b64", "meta"}` | the recorded table (CSV, base64) + `meta`: `t0`, `t_end`, `rows`, `rate_hz`, `boot` |
+| `{"type": "data", "name", "b64", "meta"}` | the recorded table (CSV, base64) + `meta`: `t0`, `t_end`, `rows`, `rate_hz`, `boot`, `wifi` (`hub direct` / `hub relay` / `FrED hotspot`) and `pi_load` (the CPU average over the recording, section 14) — the laptop writes both into *Run info* |
 | `{"type": "event", "event": "no_data", "message"}` | Retrieve Data before any data exists |
 | `{"type": "sync_reply", "id", "t1", "t2", "t3", "boot"}` | ping answer: `t2` = ping arrival, `t3` = reply departure, both on the Pi clock; `boot` = this Pi session's id |
 
@@ -387,31 +403,82 @@ Details:
 - Diameter lines from an older laptop app are ignored.
 - If the connection drops, the Pi goes back to waiting; programs can be
   started in any order.
+- The server takes **one laptop at a time**. In *Hub - relay* mode that one
+  connection comes from the hub (`192.168.50.1`), which forwards every byte
+  unchanged — the protocol above is identical in all three WiFi modes.
+
+**Hub status ping (UDP port 5006).** The hub's dashboard sends
+`{"type": "hub_ping", "id": n}` every 2 s on a separate UDP port, so it never
+touches the laptop's TCP connection. `laptop_link.py` answers
+`{"type": "hub_pong", "id", "program", "version", "boot", "uptime_s",
+"laptop", "laptop_via_hub", "phase", "experiment", "load"}`: whether a laptop
+is connected (and how), the experiment status and the CPU load (section 14).
+It costs one tiny packet every 2 s.
 
 ---
 
-## 8. WiFi hotspot
+## 8. WiFi: the hub Pi 5 or FrED's own hotspot
 
-The Pi creates its own WiFi access point, so no university/router network is
-needed:
+Up to now this Pi 4 was the WiFi **hotspot** itself: besides running FrED it
+ran the access point, DHCP and DNS for the laptop. Now a separate **Raspberry
+Pi 5 — the hub** ([`../fred-hub-pi5/`](../fred-hub-pi5/)) — can do that, and
+this Pi joins its WiFi as a plain client. Choose with `setup_wifi.sh`:
 
 ```bash
-bash setup_hotspot.sh          # create + start the hotspot
+bash setup_wifi.sh hub        # normal: join the hub's WiFi 'FrED_Hub'
+bash setup_wifi.sh hotspot    # fallback: be the 'FrED_Pi' hotspot again
+bash setup_wifi.sh status     # which mode is active (+ signal, hub ping)
+```
+
+Run it **once**; the choice is saved in NetworkManager and comes back after
+every reboot. In hub mode FrED keeps looking for the hub until it appears, so
+it does not matter which Pi is switched on first.
+
+| | Hub mode (normal) | FrED hotspot (fallback) |
+|---|---|---|
+| WiFi to join on the laptop | **`FrED_Hub`** / `fredfiber123` | `FrED_Pi` / `fredfiber123` |
+| Who runs the WiFi | the hub Pi 5 (`192.168.50.1`) | this Pi 4 |
+| This Pi's address | **`192.168.50.2`** (fixed) | `192.168.4.1` |
+| Laptop *Network* box | **Hub - direct to FrED** → `192.168.50.2:5005`, or **Hub - relay through the hub** → `192.168.50.1:5005` | **FrED hotspot (old way)** → `192.168.4.1:5005` |
+| Internet on this Pi | yes, if the hub has an ethernet cable with internet | no |
+
+**Hub - direct vs. Hub - relay** (both are offered so you can test which works
+best):
+
+- **Direct:** the laptop talks straight to this Pi; the hub only carries the
+  WiFi packets, like a router. Fewest moving parts.
+- **Relay:** the laptop talks to a program on the hub (`start_hub.sh`), which
+  opens its own connection to this Pi and copies every message both ways.
+  Nothing changes on FrED; its screen says *connected through the hub relay*.
+  The hub's dashboard then also counts the messages and measures the hub ↔
+  FrED part of every sync ping.
+
+Compare them with the laptop's **round trip** read-out, the clock-sync error
+(both also written in each run's *Run info*), and this Pi's **Pi load** box
+(section 14).
+
+What `setup_wifi.sh hub` sets (profile `FrED_Hub_Client`): the fixed address
+`192.168.50.2/24` (the hub never hands out .2–.9 by DHCP), gateway and DNS =
+the hub, **WiFi power saving off** (as a client, power saving delays incoming
+messages by up to ~100 ms — bad for the sync pings; it never applied to the
+hotspot), retry forever, priority over any other saved WiFi; and it turns off
+the `FrED_Hotspot` profile's autoconnect. `setup_wifi.sh hotspot` (or
+`setup_hotspot.sh`) does the opposite.
+
+The FrED hotspot (fallback) works exactly as before:
+
+```bash
+bash setup_hotspot.sh          # create + start the hotspot (also leaves hub mode)
 bash setup_hotspot.sh status   # show the hotspot state and the Pi's IP
 bash setup_hotspot.sh down     # stop it and return to your normal WiFi
 ```
 
-| | |
-|---|---|
-| **SSID** | `FrED_Pi` |
-| **Password** | `fredfiber123` |
-| **Pi IP** | `192.168.4.1` (the laptop connects here, port `5005`) |
-
-It uses **NetworkManager (`nmcli`)**, the default on Raspberry Pi OS
-Bookworm. The values live in `laptop_link.py` (`HOTSPOT_*`, `LINK_PORT`) and
-in `setup_hotspot.sh`; keep them in sync if you change them. The screen shows
-the Pi's actual address. While it is a hotspot the Pi has **no internet** —
-that is intended.
+Everything uses **NetworkManager (`nmcli`)**, the default on Raspberry Pi OS
+Bookworm. The values live in `laptop_link.py` (`HOTSPOT_*`, `HUB_*`,
+`FRED_HUB_IP`, `LINK_PORT`, `STATUS_PORT`), `setup_hotspot.sh`,
+`setup_wifi.sh`, the hub's `hub.conf` and the laptop app; keep them in sync if
+you change them. The screen always shows the WiFi mode and this Pi's actual
+address.
 
 ---
 
@@ -658,7 +725,8 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `main.py` | entry point: starts the GUI and the hardware-control thread (polls every 2 ms) |
 | `user_interface.py` | PyQt5 interface, the two graphs, the Pi clock `now()`, setpoint/gain accessors |
 | `experiment.py` | experiment state machine: phases, START RECORDING NOW, one-tick control + logging, recorded table |
-| `laptop_link.py` | TCP server for the laptop's commands and clock-sync pings (replaced `external_diameter.py`) |
+| `laptop_link.py` | TCP server for the laptop's commands and clock-sync pings (replaced `external_diameter.py`); WiFi-mode detection; answers the hub's status pings (UDP 5006) |
+| `pi_load.py` | the **Pi load (CPU)** readout: whole-Pi and `main.py` CPU, per thread, temperature, MHz, power (section 14) |
 | `extruder.py` | heater (thermistor, PID, 1 s mean) + stepper (own loop, 1/16 microstepping, Check Steps) |
 | `stepper_config.py` | stepper pins and **microstep resolution** (`MICROSTEPS`), shared by `extruder.py` and `step_check.py` |
 | `step_check.py`, `check_stepper.sh` | skipped-step check: exact step counts (Check Steps button + terminal speed sweep, section 9) |
@@ -666,7 +734,8 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `fan.py` | cooling fan |
 | `database.py` | logged data + manual CSV export |
 | `calibration.yaml` | motor calibration (duty ↔ RPM line) |
-| `setup_install.sh`, `setup_hotspot.sh`, `start_fred.sh`, `requirements.txt` | install, hotspot, launch |
+| `setup_install.sh`, `start_fred.sh`, `requirements.txt` | install, launch |
+| `setup_wifi.sh`, `setup_hotspot.sh` | WiFi mode: join the hub (normal) or be the hotspot (fallback) |
 | `fake_gpio.py`, `Moving_AVG_TEMP.py` | old test helpers (not used by `main.py`) |
 | `fred_terminal.py`, `motor_control.py`, `heater_control.py`, `FrED_functions.py`, `signal_filter.py` | teammate's separate tools (section 10) |
 
@@ -682,6 +751,8 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `main.LOOP_SLEEP` | 0.002 s | control-thread poll period |
 | `Plot.REDRAW_INTERVAL_MS`, `Plot.MAX_DRAWN_POINTS` | 100 ms, 1500 | graph refresh and thinning (display only) |
 | `LaptopLink.SEND_TIMEOUT`, `READ_TIMEOUT`, `IP_CACHE_S` | 30 s, 0.5 s, 10 s | network timing |
+| `laptop_link.STATUS_PORT` | 5006 (UDP) | answers the hub's status pings |
+| `LoadMonitor.WINDOW_S`, `LOG_PERIOD_S` | 10 s, 60 s | Pi load box average; terminal line period |
 
 ---
 
@@ -693,7 +764,11 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | `cannot import 'QtSvg' from 'PyQt5'` | `sudo apt install python3-pyqt5 python3-pyqt5.qtsvg`; make sure `fred-venv` was built with `--system-site-packages` |
 | GUI does not appear / `qt.qpa.plugin` errors | run from the Pi's desktop session (or with `DISPLAY` set), not a bare SSH session |
 | Where is the diameter graph? | on the laptop (v7) |
-| Laptop can't connect | check `bash setup_hotspot.sh status`, that the laptop joined `FrED_Pi`, and that `main.py` is running (it opens port 5005); make sure `fred_terminal.py` is not also running |
+| Laptop can't connect | look at the **WiFi mode** line on FrED's screen (or `bash setup_wifi.sh status`); the laptop must be on the same WiFi (`FrED_Hub` in hub mode, `FrED_Pi` in hotspot mode) with the matching *Network* preset, and `main.py` must be running (it opens port 5005); make sure `fred_terminal.py` is not also running |
+| Screen says *WiFi mode: NOT on the hub or the FrED hotspot* | `bash setup_wifi.sh hub` (is the hub on? its dashboard lists FrED when it joins) or `bash setup_wifi.sh hotspot` |
+| Hub mode, but FrED never joins | `bash setup_wifi.sh status`; check the hub's hotspot (`bash hub_hotspot.sh status` on the hub); `FrED_Hub`/password in `setup_wifi.sh` must match the hub's `hub.conf` |
+| *Hub - relay* refused: "FrED already has a laptop connected directly" | another laptop is connected in *Hub - direct* mode; disconnect it first (FrED takes one laptop at a time) |
+| Pi load box red | `main.py` ≥ 85 % of a core, the Pi ≥ 80 °C, or a power problem — see section 14 |
 | Laptop shows `clock sync: waiting` / "FrED is running older software" | the Pi runs pre-v7 code: `git pull`, restart |
 | Spooler oscillates at a high sampling rate | lower the rate (10 Hz = the original behaviour) and report it (section 4) |
 | Achieved rate stays orange | the requested rate is too high for the loop; lower it |
@@ -702,6 +777,89 @@ Standard library: `threading`, `time`, `math`, `socket`, `subprocess`,
 | Stepper turns at the wrong speed (e.g. 16× too slow or 2× too fast) | `MICROSTEPS` does not match the wiring: 1/16 only needs M2; other modes need M0/M1 wired (section 9). After `main.py`, `fred_terminal.py` runs 16× slow until a reboot |
 | Stepper knocks / the shaft mark comes back short | skipped steps: run Check Steps or `bash check_stepper.sh`, then lower the speed, raise Vref a little, heat the barrel, or check the screw for binding |
 | `check_stepper.sh` says another FrED program is running | closing `main.py`'s window leaves it running: `pkill -f main.py`, then retry |
+
+---
+
+## 14. Measuring the Pi load (CPU box)
+
+The **Pi load (CPU) - 10 s average** box (right panel, under *Laptop Link*)
+shows how busy this Pi is. Use it to check whether moving the hotspot to the
+hub actually helps, and to find what really loads the Pi.
+
+### What the numbers mean
+
+```
+Pi CPU 38%
+main.py 92% of one core
+rest of system 15%
+61 C, 1500 MHz, power OK
+main.py threads (% of one core): GUI + graphs 61%, hardware loop 28%, network 1%, other 2%
+```
+
+| Number | Meaning | What to look for |
+|---|---|---|
+| **Pi CPU** | the whole Pi, all 4 cores together (100 % = every core busy) | the overall load |
+| **main.py … of one core** | this program, measured like the `top` command: 100 % = one full core | Python runs its code on **one core at a time**, so near **100 %** `main.py` is **saturated** even if *Pi CPU* looks low (e.g. 100 % of one core = only 25 % of the Pi). That is the number that limits the sampling rate and the graphs |
+| **rest of system** | *Pi CPU* minus `main.py`: the desktop, NetworkManager, the WiFi driver, **the hotspot** … | this is where the hotspot's cost shows up — compare it between the WiFi modes |
+| **threads** | which part of `main.py` uses its time: **GUI + graphs** (the window and the plot redraws), **hardware loop** (sensors, PID, motors, data rows), **network** (laptop link + hub status), **other** | tells you *what* to optimise if `main.py` is high |
+| **temperature, MHz** | CPU temperature and current clock speed (Pi 4: 1500–1800 MHz at full speed) | at **80 °C** the Pi 4 slows itself down; a low MHz under load means throttling |
+| **power** | from `vcgencmd get_throttled`: *power OK*, *UNDER-VOLTAGE NOW*, *THROTTLED NOW*, or "… happened since boot" | **under-voltage** (weak power supply / thin cable) throttles the CPU to ~600 MHz and makes everything slow, whatever the software does — fix that first |
+
+The box turns **red** when `main.py` ≥ 85 % of a core, the Pi ≥ 80 °C, or
+there is a power problem right now. Every **minute** the terminal that runs
+`start_fred.sh` also prints a 60 s average, e.g.
+`[Pi load] 60 s average: Pi CPU 38% | main.py 92% of one core | rest of system 15% | 61 C, 1500 MHz, power OK | threads: GUI + graphs 61%, …`
+— handy to copy into your notes.
+
+The same numbers are sent to the **hub's dashboard** (*FrED load* line) and
+the average over each experiment's recording is written into the laptop's
+**Run info** sheet (*FrED CPU during recording*, *FrED main.py threads*), next
+to *Network* and *Link round trip*.
+
+### How to compare the WiFi modes (step by step)
+
+The load depends on what FrED is doing, so always compare **the same
+activity**: same sampling rate, same loops running, graphs visible, same
+experiment.
+
+1. **Baseline - FrED as the hotspot (old way).** On FrED:
+   `bash setup_wifi.sh hotspot`, then `bash start_fred.sh`. Laptop: join
+   `FrED_Pi`, *Network* = **FrED hotspot (old way)**, Connect.
+2. Start the activity, e.g. **Passive Monitoring** (or the temperature +
+   spooler loops) at **50 Hz**, or send the same short experiment each time.
+3. Wait **2 minutes**, then note the terminal's `[Pi load] 60 s average` line
+   (or read the box), the **Sampling** line (*recorded to CSV: temp … Hz*),
+   and on the laptop the **round trip** and **clock sync ±** values.
+4. **Hub - direct.** Close FrED's program. On FrED: `bash setup_wifi.sh hub`;
+   on the hub: `bash start_hub.sh`. Start FrED again. Laptop: join
+   `FrED_Hub`, *Network* = **Hub - direct to FrED**, Connect. Repeat steps
+   2–3.
+5. **Hub - relay.** Laptop: Disconnect, *Network* = **Hub - relay through the
+   hub**, Connect (FrED keeps running). Repeat steps 2–3.
+
+Fill in a table like this:
+
+| Mode | Pi CPU | main.py (1 core) | rest of system | achieved rate | laptop round trip | clock sync ± |
+|---|---|---|---|---|---|---|
+| FrED hotspot | | | | | | |
+| Hub - direct | | | | | | |
+| Hub - relay | | | | | | |
+
+**How to read the result**
+
+- The hotspot's cost appears in **rest of system** (and in *Pi CPU*). If it
+  drops clearly in the hub modes, the hub helped.
+- If **main.py** stays near 100 % of a core in every mode, the WiFi was not
+  the bottleneck: look at the **threads** line. A large *GUI + graphs* share
+  means the plot redraws are the load (they could be drawn less often);
+  a large *hardware loop* share means the sampling rate is too high for the
+  Pi.
+- Between *Hub - direct* and *Hub - relay* FrED's load should be identical
+  (FrED does the same work); they differ only in the **round trip** and the
+  **clock sync** on the laptop. Pick the one that is lower and steadier —
+  normally *direct* (the relay adds a software step on the hub).
+- Any **under-voltage** or **throttled** message invalidates the comparison:
+  fix the power supply (official 5.1 V / 3 A for the Pi 4) and repeat.
 
 ---
 
@@ -721,3 +879,13 @@ pins, experiments taking over and the manual stepper not resuming, exactly
 3200 pulses per Check Steps revolution with no overlap with the PWM, aborts,
 and the held Extruder RPM in the manual CSV. **Not yet verified on the real
 machine.**
+
+The hub support (`setup_wifi.sh`, the hub status port, WiFi-mode screen, Pi
+load box, `wifi` / `pi_load` in the run metadata) was tested on Windows with
+the real `laptop_link.py`, the real hub relay and the real laptop link over
+localhost (connect, sync, a 2.7 MB data retrieval through the relay,
+refusals, a dead laptop freed after 20 s, FrED stopping), the real interface
+offscreen in all three WiFi modes, and the CPU maths against fake `/proc`
+files with this program's real thread ids. **Not yet verified on the real
+Pis:** `setup_wifi.sh` / NetworkManager on the Pi 4, the hub's hotspot on the
+Pi 5, and the actual CPU numbers.

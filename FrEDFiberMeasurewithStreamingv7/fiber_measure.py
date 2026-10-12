@@ -74,12 +74,28 @@ DATA_DIR = os.path.join(BASE_DIR, "Data")
 CALIB_FILE = os.path.join(BASE_DIR, "calibration.json")
 
 # --------------------------------------------------------------------------- #
-# FrED Pi hotspot defaults (must match laptop_link.py / setup_hotspot.sh)
+# FrED network presets. Must match the hub's hub.conf (fred-hub-pi5/) and
+# FrED's laptop_link.py / setup_wifi.sh / setup_hotspot.sh.
 # --------------------------------------------------------------------------- #
-PI_HOTSPOT_SSID = "FrED_Pi"
+HUB_SSID = "FrED_Hub"           # WiFi of the hub Pi 5
+HUB_PASSWORD = "fredfiber123"
+HUB_IP = "192.168.50.1"         # the hub Pi 5 (its relay listens here)
+FRED_HUB_IP = "192.168.50.2"    # FrED's fixed address on the hub
+PI_HOTSPOT_SSID = "FrED_Pi"     # FrED's own hotspot (fallback)
 PI_HOTSPOT_PASSWORD = "fredfiber123"
-PI_DEFAULT_IP = "192.168.4.1"   # the Pi's address while acting as the hotspot
-PI_DEFAULT_PORT = 5005          # TCP port the Pi listens on
+PI_DEFAULT_IP = "192.168.4.1"   # FrED's address while it is the hotspot
+PI_DEFAULT_PORT = 5005          # TCP port FrED (and the hub relay) listen on
+
+# The "Network" box: name -> (WiFi to join, its password, address, port).
+LINK_MODES = {
+    "Hub - direct to FrED": (HUB_SSID, HUB_PASSWORD, FRED_HUB_IP,
+                             PI_DEFAULT_PORT),
+    "Hub - relay through the hub": (HUB_SSID, HUB_PASSWORD, HUB_IP,
+                                    PI_DEFAULT_PORT),
+    "FrED hotspot (old way)": (PI_HOTSPOT_SSID, PI_HOTSPOT_PASSWORD,
+                               PI_DEFAULT_IP, PI_DEFAULT_PORT),
+}
+DEFAULT_LINK_MODE = "Hub - direct to FrED"
 
 # Spooling-motor PID gain limits (Kp, Ki, Kd). Must match
 # UserInterface.MOTOR_GAIN_LIMITS on the Pi, which also clamps to them.
@@ -392,6 +408,25 @@ class ClockSync:
         return {"a": float(a), "b": float(b), "err": delay_min / 2.0 + rms,
                 "n": len(samples), "points": len(good),
                 "delay_min": delay_min, "boot": boot}
+
+    def recent_delays(self, n=30, boot=None):
+        """Round trip (ms) of the sync pings of Pi session ``boot`` (default:
+        latest): the last ``n`` (None = all). Compares the networks: lower
+        and steadier is better. Returns a dict or None."""
+        boot = boot if boot is not None else self.last_boot
+        with self._lock:
+            delays = [s[3] for s in self._samples if s[0] == boot]
+        if n is not None:
+            delays = delays[-n:]
+        if not delays:
+            return None
+        ordered = sorted(delays)
+        return {"n": len(delays),
+                "min": ordered[0] * 1000.0,
+                "median": statistics.median(ordered) * 1000.0,
+                "p95": ordered[min(len(ordered) - 1,
+                                   int(0.95 * len(ordered)))] * 1000.0,
+                "max": ordered[-1] * 1000.0}
 
     @staticmethod
     def to_laptop(est, t_pi):
@@ -1629,47 +1664,61 @@ class FiberApp:
         link_box.pack(fill=tk.X, pady=3)
         link_box.columnconfigure(1, weight=1)
 
-        # Reminder of which hotspot to join first.
+        # How to reach FrED: through the hub Pi 5 (direct or relayed), or
+        # FrED's own hotspot. Picking one fills in the address below.
+        ttk.Label(link_box, text="Network:").grid(row=0, column=0, sticky="w")
+        self.link_mode_var = tk.StringVar(value=DEFAULT_LINK_MODE)
+        mode_box = ttk.Combobox(link_box, textvariable=self.link_mode_var,
+                                values=list(LINK_MODES), state="readonly",
+                                width=26)
+        mode_box.grid(row=0, column=1, columnspan=2, padx=4, sticky="we")
+        mode_box.bind("<<ComboboxSelected>>",
+                      lambda _e: self._apply_link_mode())
+
+        # Reminder of which WiFi to join first (follows the Network box).
+        self.join_wifi_var = tk.StringVar()
+        ttk.Label(link_box, textvariable=self.join_wifi_var,
+                  foreground="#225522", wraplength=320,
+                  ).grid(row=1, column=0, columnspan=3, sticky="w",
+                         pady=(4, 0))
         ttk.Label(
-            link_box,
-            text=(f"1. Join Wi-Fi  '{PI_HOTSPOT_SSID}'  "
-                  f"(password: {PI_HOTSPOT_PASSWORD})"),
-            foreground="#225522", wraplength=320,
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(
-            link_box, text="2. Enter the Pi address shown on its screen:",
+            link_box, text="2. Address (set by the Network box; FrED's "
+                           "screen shows it too):",
             foreground="#555", wraplength=320,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
-        ttk.Label(link_box, text="Pi IP:").grid(row=2, column=0, sticky="w")
-        self.host_var = tk.StringVar(value=PI_DEFAULT_IP)
+        ttk.Label(link_box, text="IP:").grid(row=3, column=0, sticky="w")
+        self.host_var = tk.StringVar()
         ttk.Entry(link_box, textvariable=self.host_var, width=16).grid(
-            row=2, column=1, padx=4, sticky="we"
+            row=3, column=1, padx=4, sticky="we"
         )
 
-        ttk.Label(link_box, text="Port:").grid(row=3, column=0, sticky="w")
-        self.port_var = tk.StringVar(value=str(PI_DEFAULT_PORT))
+        ttk.Label(link_box, text="Port:").grid(row=4, column=0, sticky="w")
+        self.port_var = tk.StringVar()
         ttk.Entry(link_box, textvariable=self.port_var, width=8).grid(
-            row=3, column=1, padx=4, sticky="w"
+            row=4, column=1, padx=4, sticky="w"
         )
+        self._apply_link_mode()
 
         self.connect_btn = ttk.Button(
             link_box, text="Connect", command=self.toggle_connection
         )
-        self.connect_btn.grid(row=4, column=0, columnspan=2, pady=(6, 0),
+        self.connect_btn.grid(row=5, column=0, columnspan=2, pady=(6, 0),
                               padx=2, sticky="we")
 
         self.link_status_var = tk.StringVar(value="Not connected")
         ttk.Label(link_box, textvariable=self.link_status_var,
                   wraplength=320).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(4, 0)
+            row=6, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
         ttk.Label(
             link_box, foreground="#555", wraplength=320,
             text="The diameter stays on this laptop: the link only carries "
                  "experiment commands and a tiny clock-sync ping every "
-                 f"{SYNC_INTERVAL_S:.0f} s.").grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(2, 0))
+                 f"{SYNC_INTERVAL_S:.0f} s. 'round trip' = how long a ping "
+                 "takes there and back (lower and steadier is better - use "
+                 "it to compare the networks).").grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         # --- Experiment tab (send a whole run to FrED) ---
         self._build_experiment_tab(self._experiment_tab)
@@ -1814,8 +1863,15 @@ class FiberApp:
             est = self.sync.estimate()
             sync_text = (f"clock sync ±{est['err'] * 1000:.1f} ms "
                          f"({est['n']} pings)" if est else "clock sync: waiting")
+            rtt = self.sync.recent_delays()
+            rtt_text = (f"  |  round trip {rtt['median']:.1f} ms "
+                        f"(max {rtt['max']:.0f})" if rtt else "")
             self.link_status_var.set(
-                f"Connected to {self.link.endpoint}  |  {sync_text}")
+                f"Connected to {self.link.endpoint} ({self._link_mode_name()})"
+                f"  |  {sync_text}{rtt_text}")
+        elif self.connect_btn.cget("text") == "Disconnect":
+            # FrED (or the hub relay) closed the connection.
+            self._mark_link_lost()
         # Keep the live t = 0 estimate current as more sync samples arrive.
         if self.run is not None and self.run.get("t0_pi") is not None:
             self.run["t0_laptop"] = self._pi_to_laptop(
@@ -2250,6 +2306,26 @@ class FiberApp:
     # ------------------------------------------------------------------ #
     # Connection to the FrED Pi
     # ------------------------------------------------------------------ #
+    def _apply_link_mode(self):
+        """Network box changed: fill in its address and WiFi reminder."""
+        ssid, password, host, port = LINK_MODES.get(
+            self.link_mode_var.get(), LINK_MODES[DEFAULT_LINK_MODE])
+        self.host_var.set(host)
+        self.port_var.set(str(port))
+        relay = ("  (the hub must be running start_hub.sh)"
+                 if host == HUB_IP else "")
+        self.join_wifi_var.set(f"1. Join Wi-Fi  '{ssid}'  "
+                               f"(password: {password}){relay}")
+
+    def _link_mode_name(self, host=None, port=None):
+        """The Network-box name matching an address, or 'custom address'."""
+        host = self.link.host if host is None else host
+        port = self.link.port if port is None else port
+        for name, (_, _, mode_host, mode_port) in LINK_MODES.items():
+            if host == mode_host and port == mode_port:
+                return name
+        return "custom address"
+
     def toggle_connection(self):
         if self.link.is_open:
             self.link.close()
@@ -2262,8 +2338,8 @@ class FiberApp:
         port = self.port_var.get().strip()
         if not host or not port:
             messagebox.showwarning(
-                "Connect", "Enter the Pi's IP address and port (shown on the "
-                "Pi's screen). Default is 192.168.4.1 : 5005."
+                "Connect", "Enter FrED's IP address and port, or pick a "
+                "Network preset (FrED's screen shows the address)."
             )
             return
         try:
@@ -2271,20 +2347,32 @@ class FiberApp:
         except ValueError:
             messagebox.showwarning("Connect", f"'{port}' is not a valid port number.")
             return
+        mode = self._link_mode_name(host, port_num)
         try:
             self.link.open(host, port_num)
         except Exception as exc:
+            ssid = LINK_MODES[mode][0] if mode in LINK_MODES else None
+            if host == HUB_IP:
+                hint = ("Make sure the laptop is joined to the "
+                        f"'{HUB_SSID}' Wi-Fi and the hub Pi 5 is running "
+                        "start_hub.sh (the relay is part of it).")
+            elif ssid:
+                hint = (f"Make sure the laptop is joined to the '{ssid}' "
+                        "Wi-Fi, FrED is on it (FrED's screen shows its WiFi "
+                        "mode) and FrED's program is running.")
+            else:
+                hint = ("Make sure the laptop is on the same Wi-Fi as FrED "
+                        "and FrED's program is running.")
             messagebox.showerror(
                 "Connect failed",
-                f"Could not connect to {host}:{port_num}\n\n{exc}\n\n"
-                f"Make sure the laptop is joined to the '{PI_HOTSPOT_SSID}' "
-                "Wi-Fi and the Pi program is running."
+                f"Could not connect to {host}:{port_num} ({mode})\n\n"
+                f"{exc}\n\n{hint}"
             )
             self.link_status_var.set("Connection failed.")
             return
         self.connect_btn.configure(text="Disconnect")
-        self.link_status_var.set(f"Connected to {self.link.endpoint}")
-        self.status_var.set(f"Connected to {self.link.endpoint}.")
+        self.link_status_var.set(f"Connected to {self.link.endpoint} ({mode})")
+        self.status_var.set(f"Connected to {self.link.endpoint} ({mode}).")
         self._last_ping = time.perf_counter()
         self._sync_burst()
 
@@ -2306,7 +2394,8 @@ class FiberApp:
             self._mark_link_lost()
             return False
         self.connect_btn.configure(text="Disconnect")
-        self.link_status_var.set(f"Connected to {self.link.endpoint}")
+        self.link_status_var.set(
+            f"Connected to {self.link.endpoint} ({self._link_mode_name()})")
         return True
 
     def _pi_to_laptop(self, t_pi, boot=None, fallback=None):
@@ -2815,6 +2904,12 @@ class FiberApp:
                 self._finish_retrieve(("error", text))
             else:
                 messagebox.showinfo("No data", text)
+        elif mtype == "event" and msg.get("event") in ("relay_error",
+                                                        "relay_busy"):
+            # The hub's relay could not connect us to FrED; it hangs up next.
+            text = msg.get("message", "The hub relay could not reach FrED.")
+            self.link_status_var.set("Hub relay: " + text.split("\n")[0])
+            messagebox.showerror("Hub relay", text)
         elif mtype == "data":
             self._receive_experiment_data(msg)
 
@@ -2872,10 +2967,13 @@ class FiberApp:
             steady_rel = run["steady_t"] - t0_laptop
         est = self.sync.estimate(boot) if boot else None
         start_now = (run is not None and run.get("start_now_t") is not None)
+        link = {"mode": self._link_mode_name(), "endpoint": self.link.endpoint,
+                "rtt": self.sync.recent_delays(n=None, boot=boot)
+                if boot else None}
         return {"meta": meta, "t0_laptop": t0_laptop, "method": method,
                 "cam_rows": cam_rows, "steady_rel": steady_rel, "sync": est,
                 "params": dict(run["params"]) if run else {},
-                "start_now": start_now}
+                "start_now": start_now, "link": link}
 
     def _retrieve_worker(self, st, base, csv_text, merge):
         """Background thread: merge FrED's table with the camera data and
@@ -2961,11 +3059,30 @@ class FiberApp:
                 ("Clock drift (ppm)", round(est["b"] * 1e6, 3)),
                 ("Estimated alignment error (ms)", round(est["err"] * 1000, 2)),
             ]
+        link = merge.get("link") or {}
+        if link:
+            info.append(("Network (laptop)",
+                         f"{link.get('mode')} - {link.get('endpoint')}"))
+        rtt = link.get("rtt")
+        if rtt:
+            info.append(("Link round trip (ms)",
+                         f"median {rtt['median']:.1f}, min {rtt['min']:.1f}, "
+                         f"95% under {rtt['p95']:.1f}, max {rtt['max']:.1f} "
+                         f"({rtt['n']} pings)"))
         if meta:
             info += [
                 ("FrED rows", meta.get("rows")),
                 ("FrED rate achieved (Hz)", round(meta.get("rate_hz") or 0, 2)),
             ]
+            if meta.get("wifi"):
+                info.append(("Network (FrED)", meta["wifi"]))
+            load = meta.get("pi_load")
+            if load:
+                info += [
+                    ("FrED CPU during recording", load.get("summary", "")),
+                    ("FrED main.py threads (% of one core)",
+                     load.get("threads_text", "")),
+                ]
         if stats:
             info += [
                 ("Recording duration (s)", round(stats["duration"], 3)),

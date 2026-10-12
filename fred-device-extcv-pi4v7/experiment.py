@@ -88,6 +88,7 @@ class Experiment:
         self.csv_result = None       # built CSV text, ready to send
         self.csv_meta = {}           # timing info the laptop needs to merge
         self.csv_name = "fred_experiment"
+        self._load_mark = None       # CPU counters at recording start
 
     # ------------------------------------------------------------------ #
     # Commands (called from the network thread)
@@ -330,6 +331,10 @@ class Experiment:
         self.t_end = None
         self._rows = []
         self._last_tick = None           # log the first row straight away
+        # CPU load over the recording goes to the laptop's "Run info"
+        # (reads no files here: it reuses the GUI's once-a-second sample).
+        monitor = getattr(self.gui, "load_monitor", None)
+        self._load_mark = monitor.mark() if monitor else None
         self.remaining = self._delay("data_taking_time")
         # Clear the on-screen graphs right as recording begins, so the plots
         # show exactly the window that will be exported to the CSV/Excel
@@ -457,7 +462,12 @@ class Experiment:
                 "rows": len(self._rows),
                 "rate_hz": (len(self._rows) / duration) if duration > 0 else 0,
                 "boot": self.gui.laptop_link.boot_id,
+                "wifi": self.gui.laptop_link.link_description(),
             }
+            monitor = getattr(self.gui, "load_monitor", None)
+            load = monitor.average_since(self._load_mark) if monitor else None
+            if load is not None:
+                self.csv_meta["pi_load"] = load
         except Exception as exc:
             print(f"[Experiment] CSV build error: {exc}")
             self.csv_result = None

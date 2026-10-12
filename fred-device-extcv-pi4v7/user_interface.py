@@ -4,7 +4,8 @@ The fiber diameter is measured, graphed and recorded entirely on an external
 computer (the laptop CV app). Since v7 it is not streamed to the Pi at all: the
 Pi's CPU goes to the heater and spooler control loops and to their two graphs
 (DC Motor and Temperature). The laptop connects over WiFi only to send
-experiments and commands (see ``laptop_link.py``).
+experiments and commands (see ``laptop_link.py``). The "Pi load (CPU)" box
+shows how busy the Pi is (``pi_load.py``).
 """
 import time
 
@@ -18,8 +19,9 @@ from matplotlib.figure import Figure
 
 import stepper_config
 from database import Database
-from laptop_link import LaptopLink
+from laptop_link import LaptopLink, HUB_IP, FRED_HUB_IP
 from experiment import Experiment
+from pi_load import LoadMonitor
 from step_check import SKIP_ADVICE
 
 
@@ -116,6 +118,9 @@ class UserInterface():
         # --- Remote experiment controller (driven from the laptop) -------- #
         self.experiment = Experiment(self)
 
+        # --- CPU load readout (also reported to the hub Pi 5) ------------- #
+        self.load_monitor = LoadMonitor()
+
         # --- WiFi command link to the laptop (experiments, sync) ---------- #
         self.laptop_link = LaptopLink(self)
 
@@ -190,6 +195,14 @@ class UserInterface():
         self.sampling_status_label = QLabel("Sampling: waiting for data...")
         self.sampling_status_label.setWordWrap(True)
 
+        # How busy the Pi is (pi_load.py), refreshed once a second
+        self.load_label = QLabel("Pi load: measuring...")
+        self.load_label.setWordWrap(True)
+        self.load_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.load_threads_label = QLabel("")
+        self.load_threads_label.setWordWrap(True)
+        self.load_threads_label.setStyleSheet("color: #888888;")
+
         # Remote-experiment status (driven from the laptop)
         self.experiment_status_label = QLabel("Experiment: idle")
         self.experiment_status_label.setWordWrap(True)
@@ -235,6 +248,7 @@ class UserInterface():
         # ---- Right: scrollable controls ---------------------------------- #
         controls = QVBoxLayout()
         controls.addWidget(self._build_link_group())
+        controls.addWidget(self._build_load_group())
         controls.addWidget(self._build_graphs_group())
         controls.addWidget(self._build_monitor_group())
         controls.addWidget(self._build_temperature_group())
@@ -268,6 +282,23 @@ class UserInterface():
         self.connection_status_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.connection_status_label)
 
+        box.setLayout(layout)
+        return box
+
+    def _build_load_group(self) -> QGroupBox:
+        box = QGroupBox("Pi load (CPU) - 10 s average")
+        layout = QVBoxLayout()
+        layout.addWidget(self.load_label)
+        layout.addWidget(self.load_threads_label)
+        hint = QLabel(
+            "Pi CPU = whole Pi (4 cores). main.py = this program, % of ONE "
+            "core (~100% = saturated). Rest of system = everything else, "
+            "incl. the WiFi hotspot. Compare the same activity in each WiFi "
+            "mode (README: 'Measuring the Pi load'); the terminal prints a "
+            "60 s average every minute.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888888;")
+        layout.addWidget(hint)
         box.setLayout(layout)
         return box
 
@@ -812,15 +843,38 @@ class UserInterface():
         if len(ips) > 1:
             others = ", ".join(ip for ip in ips if ip != info["ip"])
             ip_line = f"{info['ip']}   (also: {others})"
-        client_line = (f"Laptop connected: {info['client']}"
-                       if info["client"] else "Laptop: not connected yet")
-        self.connection_info_label.setText(
-            f"1) Join WiFi network:  {info['ssid']}\n"
-            f"     password:  {info['password']}\n"
-            f"2) In the laptop app, connect to:\n"
-            f"     IP:  {ip_line}\n"
-            f"     Port:  {info['port']}\n"
-            f"{client_line}")
+        if not info["client"]:
+            client_line = "Laptop: not connected yet"
+        elif info["via_hub"]:
+            client_line = "Laptop connected through the hub relay"
+        else:
+            client_line = f"Laptop connected directly: {info['client']}"
+        if info["mode"] == "hub":
+            self.connection_info_label.setText(
+                f"WiFi mode: HUB  (FrED joined '{info['ssid']}', "
+                f"password {info['password']})\n"
+                f"This Pi:  {ip_line}\n"
+                f"Laptop: join '{info['ssid']}', then in its Network box:\n"
+                f"   Hub - direct  ->  {FRED_HUB_IP} : {info['port']}\n"
+                f"   Hub - relay   ->  {HUB_IP} : {info['port']}"
+                f"  (hub runs start_hub.sh)\n"
+                f"{client_line}")
+        elif info["mode"] == "hotspot":
+            self.connection_info_label.setText(
+                f"WiFi mode: FrED HOTSPOT (fallback; hub mode: "
+                f"bash setup_wifi.sh hub)\n"
+                f"1) Join WiFi network:  {info['ssid']}\n"
+                f"     password:  {info['password']}\n"
+                f"2) In the laptop app pick 'FrED hotspot', connect to:\n"
+                f"     IP:  {ip_line}\n"
+                f"     Port:  {info['port']}\n"
+                f"{client_line}")
+        else:
+            self.connection_info_label.setText(
+                "WiFi mode: NOT on the hub or the FrED hotspot.\n"
+                "In a terminal:  bash setup_wifi.sh hub   (or: hotspot)\n"
+                f"This Pi:  {ip_line}   port {info['port']}\n"
+                f"{client_line}")
 
         self.experiment_status_label.setText(self.experiment.status_line())
 
@@ -917,6 +971,27 @@ class UserInterface():
             color = "orange"    # recording, but slower than requested
         self.sampling_status_label.setStyleSheet(color and f"color: {color};")
 
+    def _update_load_label(self) -> None:
+        if not self.load_monitor.available:
+            self.load_label.setText("Pi load: not available here (needs "
+                                    "Linux /proc)")
+            return
+        try:
+            result = self.load_monitor.sample()
+        except Exception as exc:          # a readout must never stop the GUI
+            self.load_label.setText(f"Pi load: read error ({exc})")
+            return
+        if result is None:
+            return                         # first sample: nothing to average
+        self.load_label.setText(result["summary"].replace("  |  ", "\n"))
+        self.load_threads_label.setText(
+            f"main.py threads (% of one core): {result['threads_text']}")
+        if result["bad"] != getattr(self, "_load_bad", None):
+            self._load_bad = result["bad"]    # restyle only on a change
+            self.load_label.setStyleSheet(
+                "color: #d9534f; font-weight: bold;" if result["bad"]
+                else "font-weight: bold;")
+
     def start_gui(self) -> None:
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_connection_status)
@@ -931,6 +1006,11 @@ class UserInterface():
         self.rate_timer = QTimer()
         self.rate_timer.timeout.connect(self._update_rate_label)
         self.rate_timer.start(1000)
+
+        # CPU load readout (pi_load.py), once a second.
+        self.load_timer = QTimer()
+        self.load_timer.timeout.connect(self._update_load_label)
+        self.load_timer.start(1000)
 
         self.window.show()
         self.app.exec_()
