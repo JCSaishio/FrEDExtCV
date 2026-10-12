@@ -7,3 +7,6 @@
 
 # Windows batch files need CRLF.
 *.bat text eol=crlf
+
+# Settings files sourced by bash on the Pis (hub.conf) - LF for the same reason.
+*.conf text eol=lf
